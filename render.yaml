@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: dotnet-migration-agent
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: RENDER
+        value: "true"
+      - key: PORT
+        value: "8050"
+      - key: PYTHONUNBUFFERED
+        value: "1"

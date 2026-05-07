@@ -1,0 +1,73 @@
+@model LegacyCustomerPortalNet45.Models.OrderDashboardViewModel
+@{
+    ViewBag.Title = "Dashboard";
+}
+
+<section class="hero">
+    <div>
+        <h1>@Model.PortalName</h1>
+        <p>Classic ASP.NET MVC 5 frontend with Web API backend running on .NET Framework 4.5.</p>
+    </div>
+    <button id="refreshApi">Call Orders API</button>
+</section>
+
+<section class="metrics">
+    <article>
+        <span>Customers</span>
+        <strong>@Model.Customers.Count</strong>
+    </article>
+    <article>
+        <span>Open Orders</span>
+        <strong>@Model.OpenOrders</strong>
+    </article>
+    <article>
+        <span>Total Revenue</span>
+        <strong>@Model.TotalRevenue.ToString("C")</strong>
+    </article>
+</section>
+
+<section class="grid">
+    <article class="panel">
+        <h2>Recent Orders</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Order</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var order in Model.RecentOrders)
+                {
+                    <tr>
+                        <td>@order.OrderNumber</td>
+                        <td>@order.OrderDate.ToString("yyyy-MM-dd")</td>
+                        <td>@order.Status</td>
+                        <td>@order.TotalAmount.ToString("C")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </article>
+
+    <article class="panel">
+        <h2>Customers</h2>
+        <ul class="customer-list">
+            @foreach (var customer in Model.Customers)
+            {
+                <li>
+                    <strong>@customer.Name</strong>
+                    <span>@customer.Segment</span>
+                    <small>@customer.Email</small>
+                </li>
+            }
+        </ul>
+    </article>
+</section>
+
+<section class="panel api-panel">
+    <h2>API Response Preview</h2>
+    <pre id="apiResult">Click "Call Orders API" to test the backend endpoint.</pre>
+</section>

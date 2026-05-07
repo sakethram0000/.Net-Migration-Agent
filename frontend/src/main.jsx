@@ -1,0 +1,581 @@
+import React, { useMemo, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import './styles.css';
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const steps = ['Ingest', 'Analyze', 'Transform', 'Validate', 'Package'];
+
+function App() {
+  const [fromVersion, setFromVersion] = useState('.NET Framework 4.8');
+  const [toVersion, setToVersion] = useState('.NET 8');
+  const [files, setFiles] = useState([]);
+  const [githubUrl, setGithubUrl] = useState('');
+  const [uploadMode, setUploadMode] = useState('local');
+  const [inventory, setInventory] = useState(null);
+  const [job, setJob] = useState(null);
+  const [report, setReport] = useState(null);
+  const [terminal, setTerminal] = useState('Terminal output will appear here when migration runs...');
+  const [busy, setBusy] = useState('');
+  const [runtime, setRuntime] = useState(null);
+  const [selectedOutput, setSelectedOutput] = useState(null);
+  const [appRuntime, setAppRuntime] = useState({ status: 'stopped', url: '', logs: [] });
+  const [smokeTest, setSmokeTest] = useState(null);
+  const inputRef = useRef(null);
+
+  const scopes = useMemo(() => ['Project files', 'Source code', 'Packages', 'Config', 'Build fix', 'Tests'], []);
+  const stageIndex = getStageIndex(job);
+
+  async function uploadSelected(event) {
+    const selected = [...(event.target.files || [])];
+    event.target.value = '';
+    if (!selected.length) return;
+    const form = new FormData();
+    selected.forEach((file) => form.append('files', file));
+    setBusy('upload');
+    try {
+      const data = await postForm('/api/files/upload', form);
+      setFiles(data.files || []);
+      log(`Uploaded ${data.files?.length || 0} file(s).`);
+      await runAnalyze();
+    } catch (err) {
+      log(`Upload failed: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function fetchGithub() {
+    if (!githubUrl.trim()) return;
+    setBusy('github');
+    try {
+      const data = await postJson('/api/files/github', { url: githubUrl });
+      setFiles([{ name: data.repo, type: 'github', size: data.inventory?.total_file_count || 0 }]);
+      setInventory(data.inventory);
+      log(`Fetched ${data.repo} from ${data.branch}.`);
+    } catch (err) {
+      log(`GitHub fetch failed: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function runAnalyze() {
+    setBusy('analyze');
+    try {
+      const data = await postJson('/api/migration/analyze', { from_version: fromVersion, to_version: toVersion });
+      setInventory(data);
+      log(`Analyzed ${data.project_count} project(s), ${data.source_file_count} C# file(s).`);
+    } catch (err) {
+      log(`Analysis failed: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function startMigration() {
+    setBusy('migration');
+    setReport(null);
+    setSelectedOutput(null);
+    try {
+      const data = await postJson('/api/migration/start', {
+        from_version: fromVersion,
+        to_version: toVersion,
+        scopes: Object.fromEntries(scopes.map((scope) => [scope, true]))
+      });
+      log(`Migration job queued: ${data.job_id}`);
+      poll(data.job_id);
+    } catch (err) {
+      log(`Migration failed to start: ${err.message}`);
+      setBusy('');
+    }
+  }
+
+  async function poll(jobId) {
+    for (let i = 0; i < 360; i += 1) {
+      const data = await fetchJson(`/api/migration/status/${jobId}`);
+      setJob(data);
+      log(`${data.stage}: ${data.progress}`);
+      if (['completed', 'needs_review', 'failed'].includes(data.status)) {
+        setBusy('');
+        try {
+          setReport(await fetchJson(`/api/migration/report/${jobId}`));
+        } catch {
+          setReport(data.report || null);
+        }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    setBusy('');
+    log('Migration polling timed out.');
+  }
+
+  async function loadRuntime() {
+    const data = await fetchJson('/health');
+    setRuntime(data.runtime);
+  }
+
+  async function startMigratedApp() {
+    if (!job?.job_id) return;
+    setBusy('runtime');
+    try {
+      const data = await fetchJson(`/api/runtime/start/${job.job_id}`, { method: 'POST' });
+      setAppRuntime(data);
+      log(`Migrated app runtime: ${data.status} ${data.url || ''}`);
+    } catch (err) {
+      log(`Runtime start failed: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function stopMigratedApp() {
+    if (!job?.job_id) return;
+    const data = await fetchJson(`/api/runtime/stop/${job.job_id}`, { method: 'POST' });
+    setAppRuntime(data);
+    log('Migrated app stopped.');
+  }
+
+  async function refreshMigratedApp() {
+    if (!job?.job_id) return;
+    const data = await fetchJson(`/api/runtime/status/${job.job_id}`);
+    setAppRuntime(data);
+  }
+
+  async function runSmokeTest() {
+    if (!job?.job_id) return;
+    setBusy('smoke');
+    try {
+      const data = await fetchJson(`/api/runtime/smoke-test/${job.job_id}`, { method: 'POST' });
+      setSmokeTest(data);
+      setAppRuntime(data.runtime || appRuntime);
+      log(`Smoke test ${data.status}: ${data.summary}`);
+    } catch (err) {
+      log(`Smoke test failed: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function log(line) {
+    setTerminal((prev) => `${prev === 'Terminal output will appear here when migration runs...' ? '' : `${prev}\n`}${line}`);
+  }
+
+  return (
+    <>
+      <section className="ma-hero">
+        <div className="ma-hero-content">
+          <div className="ma-hero-brand">
+            <div className="ma-hero-logo">.N</div>
+            <div>
+              <div className="ma-hero-title">.NET Migration Agent</div>
+              <div className="ma-hero-subtitle">Migrate legacy .NET applications to modern target versions with Microsoft Agent Framework orchestration and LLM-assisted build fixing.</div>
+            </div>
+          </div>
+          <div className="ma-hero-pills">
+            <span className="hero-pill"><span className="pill-dot blue"></span>Microsoft Agent Framework</span>
+            <span className="hero-pill"><span className="pill-dot purple"></span>OpenAI / Azure OpenAI</span>
+            <span className="hero-pill"><span className="pill-dot green"></span>.NET 8/9/10</span>
+            <span className="hero-pill"><span className="pill-dot orange"></span>Build Validation</span>
+          </div>
+        </div>
+      </section>
+
+      <main className="ma-container">
+        <section className="ma-card">
+          <div className="ma-card-header"><div className="ma-card-title">Migration Path</div><button onClick={loadRuntime}>Runtime Status</button></div>
+          <div className="ma-card-body">
+            <div className="version-row">
+              <Select label="From Version" value={fromVersion} setValue={setFromVersion} values={['.NET Framework 4.5', '.NET Framework 4.6', '.NET Framework 4.7', '.NET Framework 4.8', '.NET Core 3.1', '.NET 5', '.NET 6', '.NET 7']} />
+              <div className="version-arrow">to</div>
+              <Select label="To Version" value={toVersion} setValue={setToVersion} values={['.NET 8', '.NET 9', '.NET 10']} />
+            </div>
+            <div className={`compat-matrix ${inventory?.complexity?.level === 'High' ? 'warning' : 'success'}`}>
+              <div className="compat-left">
+                <div className="compat-status-title">{inventory ? `${inventory.complexity.level} migration complexity` : 'Ready for project analysis'}</div>
+                <div className="compat-status-msg">{inventory?.recommended_path || 'Upload a project zip or fetch a GitHub repository to generate the migration plan.'}</div>
+              </div>
+              <div className="compat-right">
+                <Metric label="Projects" value={inventory?.project_count || 0} />
+                <Metric label="Files" value={inventory?.source_file_count || 0} />
+                <Metric label="Score" value={inventory?.complexity?.score || 0} />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="two-col">
+          <article className="ma-card">
+            <div className="ma-card-header"><div className="ma-card-title">Upload Source</div></div>
+            <div className="ma-card-body">
+              <div className="upload-tabs">
+                <button className={uploadMode === 'local' ? 'active' : ''} onClick={() => setUploadMode('local')}>Local Files</button>
+                <button className={uploadMode === 'github' ? 'active' : ''} onClick={() => setUploadMode('github')}>GitHub URL</button>
+              </div>
+              {uploadMode === 'local' ? (
+                <div className="upload-zone" onClick={() => inputRef.current?.click()}>
+                  <div className="upload-icon">ZIP</div>
+                  <h3>Drop or browse for .zip, .sln, .csproj, .cs files</h3>
+                  <p>The backend ignores .git, bin, obj, packages, and node_modules.</p>
+                  <input ref={inputRef} hidden type="file" multiple accept=".zip,.sln,.csproj,.cs,.config,.json,.razor,.cshtml" onChange={uploadSelected} />
+                  <button className="browse-btn">{busy === 'upload' ? 'Uploading...' : 'Browse Files'}</button>
+                </div>
+              ) : (
+                <div className="github-input-area">
+                  <input className="github-input" value={githubUrl} onChange={(event) => setGithubUrl(event.target.value)} placeholder="https://github.com/owner/repo" />
+                  <button className="browse-btn" disabled={busy === 'github'} onClick={fetchGithub}>{busy === 'github' ? 'Fetching...' : 'Fetch Repository'}</button>
+                </div>
+              )}
+              <div className="file-list">{files.map((file) => <div className="file-item" key={file.name}><span>{file.type}</span><span className="fn">{file.name}</span><span className="fs">{file.size}</span></div>)}</div>
+            </div>
+          </article>
+
+          <article className="ma-card">
+            <div className="ma-card-header"><div className="ma-card-title">Migration Controls</div></div>
+            <div className="ma-card-body">
+              <div className="scope-grid">{scopes.map((scope) => <div className="scope-card on" key={scope}><div className="si">{scope.slice(0, 2)}</div><div className="sl">{scope}</div></div>)}</div>
+              <button className="run-btn" disabled={!files.length || busy === 'migration'} onClick={startMigration}>{busy === 'migration' ? 'Migration running...' : 'Run Migration'}</button>
+              <button className="secondary-run" disabled={!files.length} onClick={runAnalyze}>Refresh Analysis</button>
+              {runtime && <div className="runtime-box">{runtime.agent_framework.detail}<br />LLM: {runtime.llm.provider} / {runtime.llm.model}</div>}
+            </div>
+          </article>
+        </section>
+
+        <section className="ma-card">
+          <div className="ma-card-header"><div className="ma-card-title">Execution Progress</div><span className="section-status">{job?.progress || 'Waiting for migration to start'}</span></div>
+          <div className="ma-card-body">
+            <div className="stepper">
+              <div className="stepper-progress" style={{ width: `${job ? Math.min(100, (stageIndex + 1) * 22) : 0}%` }}></div>
+              {steps.map((step, index) => {
+                const state = getStepState(index, stageIndex, job);
+                return <div className="step-item" key={step}><div className={`step-circle ${state}`}>{state === 'completed' ? 'OK' : index + 1}</div><div className={`step-label ${state}`}>{step}</div><div className="step-sub">{state === 'completed' ? 'Done' : state === 'active' ? 'Running' : 'Waiting'}</div></div>;
+              })}
+            </div>
+            <pre className="terminal">{terminal}</pre>
+          </div>
+        </section>
+
+        <ReadinessScorecard readiness={report?.readiness} inventory={inventory} />
+
+        <section className="two-col">
+          <Findings inventory={inventory} report={report} />
+          <Actions runtime={runtime} />
+        </section>
+
+        <section className="ma-card">
+          <div className="ma-card-header"><div className="ma-card-title">Generated Outputs</div><span className="section-status">{report ? 'Ready' : 'Available after migration'}</span></div>
+          <div className="ma-card-body outputs-grid">
+            <Output title="Migration Summary" ready={!!report} onClick={() => setSelectedOutput(outputContent('Migration Summary', report))} />
+            <Output title="Dependency Map" ready={!!inventory} onClick={() => setSelectedOutput(outputContent('Dependency Map', inventory))} />
+            <Output title="Validation Report" ready={!!report?.validation} onClick={() => setSelectedOutput(outputContent('Validation Report', report.validation))} />
+            <Output title="Migration Diff" ready={!!report?.diff} onClick={() => setSelectedOutput(outputContent('Migration Diff', report.diff))} />
+            <Output title="Code Rewrite Preview" ready={!!report?.code_rewrite_previews} onClick={() => setSelectedOutput(outputContent('Code Rewrite Preview', report.code_rewrite_previews))} />
+            <Output title="Build Error AI Fixer" ready={!!report?.build_fixer} onClick={() => setSelectedOutput(outputContent('Build Error AI Fixer', report.build_fixer))} />
+            <Output title="Dependency Assistant" ready={!!report?.dependency_modernization} onClick={() => setSelectedOutput(outputContent('Dependency Assistant', report.dependency_modernization))} />
+            <Output title="Architecture Suggestions" ready={!!report?.architecture_suggestions} onClick={() => setSelectedOutput(outputContent('Architecture Suggestions', report.architecture_suggestions))} />
+            <Output title="Test Generation Agent" ready={!!report?.generated_tests} onClick={() => setSelectedOutput(outputContent('Test Generation Agent', report.generated_tests))} />
+            <Output title="Executive Report" ready={!!report?.executive_report} onClick={() => setSelectedOutput(outputContent('Executive Report', report.executive_report))} />
+            <Output title="Manual Fix List" ready={!!report} onClick={() => setSelectedOutput(outputContent('Manual Fix List', report?.manual_fixes || []))} />
+            <Output title="Change Log" ready={!!report} onClick={() => setSelectedOutput(outputContent('Change Log', report?.changes || []))} />
+            <Output title="Migrated Project Zip" ready={!!job?.download_path} onClick={() => window.location.href = `${API_BASE}/api/migration/download/${job.job_id}`} />
+          </div>
+          {selectedOutput && <OutputDetail output={selectedOutput} jobId={job?.job_id} />}
+        </section>
+
+        <section className="ma-card">
+          <div className="ma-card-header">
+            <div className="ma-card-title">Run Migrated Application</div>
+            <span className="section-status">{appRuntime.status}</span>
+          </div>
+          <div className="ma-card-body runtime-panel">
+            <div className="runtime-actions">
+              <button className="run-btn compact-run" disabled={!job?.download_path || busy === 'runtime'} onClick={startMigratedApp}>{busy === 'runtime' ? 'Starting...' : 'Run Migrated App'}</button>
+              <button className="secondary-run inline" disabled={!job?.job_id} onClick={refreshMigratedApp}>Refresh Logs</button>
+              <button className="secondary-run inline smoke" disabled={!job?.download_path || busy === 'smoke'} onClick={runSmokeTest}>{busy === 'smoke' ? 'Testing...' : 'Run Smoke Test'}</button>
+              <button className="secondary-run inline danger" disabled={!job?.job_id} onClick={stopMigratedApp}>Stop</button>
+            </div>
+            {smokeTest && <SmokeTestResult smokeTest={smokeTest} />}
+            <div className="runtime-url">
+              <span>Application URL</span>
+              {appRuntime.url && appRuntime.status === 'running' ? <a href={appRuntime.url} target="_blank" rel="noreferrer">{appRuntime.url}</a> : <strong>{appRuntime.url ? `${appRuntime.url} (${appRuntime.status})` : 'Available after runtime starts'}</strong>}
+            </div>
+            <pre className="runtime-logs">{(appRuntime.logs || []).join('\n') || 'Runtime logs will appear here after you start the migrated app.'}</pre>
+          </div>
+        </section>
+      </main>
+    </>
+  );
+}
+
+function Select({ label, value, setValue, values }) {
+  return <div className="version-group"><label>{label}</label><select className="version-select" value={value} onChange={(event) => setValue(event.target.value)}>{values.map((item) => <option key={item}>{item}</option>)}</select></div>;
+}
+
+function Metric({ label, value }) {
+  return <div className="compat-metric"><span className="cm-label">{label}</span><div className="cm-bar"><div className="cm-fill effort" style={{ width: `${Math.min(100, Number(value) || 0)}%` }}></div></div><span className="cm-val">{value}</span></div>;
+}
+
+function ReadinessScorecard({ readiness, inventory }) {
+  const fallback = inventory ? {
+    score: Math.max(0, 100 - Number(inventory?.complexity?.score || 0)),
+    level: 'Pre-migration estimate',
+    summary: inventory.recommended_path,
+    categories: [
+      { name: 'Project Compatibility', score: Math.max(0, 100 - Number(inventory?.complexity?.score || 0)), status: 'Estimate', description: 'Inventory-based readiness estimate' },
+      { name: 'Legacy Findings', score: Math.max(0, 100 - (inventory?.patterns?.length || 0) * 8), status: 'Estimate', description: `${inventory?.patterns?.length || 0} migration findings detected` },
+    ],
+    recommendations: ['Run migration to generate the full readiness scorecard.'],
+  } : null;
+  const data = readiness || fallback;
+  if (!data) return null;
+  return (
+    <section className="ma-card readiness-card">
+      <div className="ma-card-header">
+        <div className="ma-card-title">Readiness Scorecard</div>
+        <span className="section-status">{data.level}</span>
+      </div>
+      <div className="ma-card-body readiness-body">
+        <div className="readiness-score">
+          <div className="score-ring" style={{ '--score': `${data.score}%` }}>
+            <span>{data.score}</span>
+          </div>
+          <div>
+            <h3>{data.level}</h3>
+            <p>{data.summary}</p>
+          </div>
+        </div>
+        <div className="readiness-grid">
+          {(data.categories || []).map((item) => (
+            <article className={`readiness-item ${item.status?.toLowerCase()}`} key={item.name}>
+              <div className="readiness-item-top"><strong>{item.name}</strong><span>{item.score}</span></div>
+              <div className="readiness-bar"><div style={{ width: `${item.score}%` }}></div></div>
+              <p>{item.description}</p>
+            </article>
+          ))}
+        </div>
+        <div className="readiness-recs">{(data.recommendations || []).map((item) => <div key={item}>{item}</div>)}</div>
+      </div>
+    </section>
+  );
+}
+
+function Findings({ inventory, report }) {
+  const critical = inventory?.patterns?.filter((item) => item.severity === 'High') || [];
+  const warnings = inventory?.patterns?.filter((item) => item.severity !== 'High') || [];
+  return <article className="ma-card"><div className="ma-card-header"><div className="ma-card-title">Key Findings</div></div><div className="ma-card-body"><div className="findings-summary"><Badge label="Critical" count={critical.length} cls="critical" /><Badge label="Warnings" count={warnings.length} cls="warning" /><Badge label="Manual Fixes" count={report?.manual_fixes?.length || 0} cls="info" /></div><div className="findings-list">{[...critical, ...warnings].map((item, i) => <div className={`f-item ${item.severity === 'High' ? 'critical' : 'warning'}`} key={`${item.title}-${i}`}>{item.title}: {item.action}</div>)}</div></div></article>;
+}
+
+function Actions({ runtime }) {
+  const actions = runtime?.planned_agents || [
+    { name: 'Ingestion Agent', role: 'Create isolated workspace' },
+    { name: 'Inventory Agent', role: 'Scan projects and packages' },
+    { name: 'Migration Planner Agent', role: 'Create target-version plan' },
+    { name: 'Build Validator Agent', role: 'Run dotnet restore/build/test' },
+  ];
+  return <article className="ma-card"><div className="ma-card-header"><div className="ma-card-title">Autonomous Actions</div></div><div className="ma-card-body action-list">{actions.map((a) => <div className="a-item" key={a.name}><span className="a-icon">AF</span><span className="a-text"><strong>{a.name}</strong><br />{a.role}</span></div>)}</div></article>;
+}
+
+function Badge({ label, count, cls }) {
+  return <div className={`f-badge ${cls}`}><div className="fc">{count}</div><div className="fl">{label}</div></div>;
+}
+
+function Output({ title, ready, onClick }) {
+  return <button className={`out-card ${ready ? '' : 'disabled'}`} onClick={ready ? onClick : undefined}><div className="out-icon">DOC</div><div className="out-title">{title}</div><div className="out-desc">{ready ? 'Open or download' : 'Pending'}</div></button>;
+}
+
+function OutputDetail({ output, jobId }) {
+  return (
+    <section className="output-detail">
+      <div className="detail-head">
+        <h2>{output.title}</h2>
+        <div className="report-actions">
+          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/preview`} target="_blank" rel="noreferrer">Preview Report</a>}
+          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/download?format=csv`}>Download CSV</a>}
+          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/download?format=html`}>Download HTML/PDF</a>}
+          <button onClick={() => downloadJson(`${output.title.toLowerCase().replaceAll(' ', '-')}.json`, output.data)}>JSON</button>
+        </div>
+      </div>
+      {output.type === 'summary' && <SummaryDetail report={output.data} />}
+      {output.type === 'dependency' && <DependencyDetail inventory={output.data} />}
+      {output.type === 'validation' && <ValidationDetail validation={output.data} />}
+      {output.type === 'diff' && <DiffDetail diff={output.data} />}
+      {output.type === 'rewrite' && <RewritePreviewDetail items={output.data} />}
+      {output.type === 'agentReport' && <AgentReportDetail report={output.data} />}
+      {output.type === 'list' && <ListDetail items={output.data} />}
+      <pre className="detail-json">{JSON.stringify(output.data, null, 2)}</pre>
+    </section>
+  );
+}
+
+function SummaryDetail({ report }) {
+  const inv = report?.inventory || {};
+  return <div className="detail-grid"><Card label="From" value={report?.from_version} /><Card label="To" value={report?.to_version} /><Card label="Projects" value={inv.project_count || 0} /><Card label="Build" value={report?.validation?.success ? 'Passed' : 'Needs Review'} /></div>;
+}
+
+function DependencyDetail({ inventory }) {
+  const projects = inventory?.projects || [];
+  return (
+    <div className="dependency-detail">
+      {projects.map((project) => (
+        <div className="dep-card" key={project.path}>
+          <strong>{project.path}</strong>
+          <span>{project.target_framework || 'No framework detected'}</span>
+          {(project.packages || []).map((pkg) => <p key={`${project.path}-${pkg.name}`}>{pkg.name} {pkg.version}</p>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ValidationDetail({ validation }) {
+  return <div className={`validation-banner ${validation?.success ? 'success' : 'failed'}`}>{validation?.success ? 'Build succeeded' : 'Build failed or needs review'} at stage {validation?.stage || 'unknown'}</div>;
+}
+
+function DiffDetail({ diff }) {
+  const summary = diff?.summary || {};
+  return (
+    <div className="diff-detail">
+      <div className="detail-grid">
+        <Card label="Added" value={summary.added || 0} />
+        <Card label="Modified" value={summary.modified || 0} />
+        <Card label="Removed" value={summary.removed || 0} />
+        <Card label="Unchanged" value={summary.unchanged || 0} />
+      </div>
+      <div className="diff-columns">
+        <FileList title="Added Files" files={diff?.added || []} />
+        <FileList title="Modified Files" files={diff?.modified || []} />
+        <FileList title="Removed Files" files={diff?.removed || []} />
+      </div>
+      {(diff?.previews || []).map((preview) => <pre className="diff-preview" key={preview.path}>{preview.diff}</pre>)}
+    </div>
+  );
+}
+
+function RewritePreviewDetail({ items }) {
+  return <div className="rewrite-preview">{(items || []).map((item) => <article key={item.path}><h3>{item.path}</h3><p>{item.explanation}</p><div className="rewrite-columns"><pre>{item.legacy}</pre><pre>{item.proposed}</pre></div></article>)}</div>;
+}
+
+function AgentReportDetail({ report }) {
+  const items = Array.isArray(report) ? report : report?.items || Object.entries(report || {}).map(([key, value]) => ({ name: key, value }));
+  return <div className="agent-report">{items.map((item, index) => <article key={index}>{Object.entries(item).map(([key, value]) => <p key={key}><strong>{key}</strong><span>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</span></p>)}</article>)}</div>;
+}
+
+function FileList({ title, files }) {
+  return <article className="diff-list"><strong>{title}</strong>{files.length ? files.slice(0, 12).map((file) => <span key={file}>{file}</span>) : <span>None</span>}</article>;
+}
+
+function SmokeTestResult({ smokeTest }) {
+  return (
+    <div className={`smoke-result ${smokeTest.status}`}>
+      <div className="smoke-summary"><strong>{smokeTest.summary}</strong><span>{smokeTest.url}</span></div>
+      <div className="smoke-checks">
+        {(smokeTest.checks || []).map((check) => (
+          <div className={`smoke-check ${check.passed ? 'passed' : 'failed'}`} key={check.name}>
+            <strong>{check.passed ? 'PASS' : 'REVIEW'}</strong>
+            <span>{check.name}</span>
+            <em>{check.status_code || 'n/a'}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ListDetail({ items }) {
+  const list = Array.isArray(items) ? items : [];
+  return <div className="detail-list">{list.length ? list.map((item, index) => <div key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</div>) : <div>No items available.</div>}</div>;
+}
+
+function Card({ label, value }) {
+  return <article><span>{label}</span><strong>{String(value ?? '')}</strong></article>;
+}
+
+function outputContent(title, data) {
+  const typeByTitle = {
+    'Migration Summary': 'summary',
+    'Dependency Map': 'dependency',
+    'Validation Report': 'validation',
+    'Migration Diff': 'diff',
+    'Code Rewrite Preview': 'rewrite',
+    'Build Error AI Fixer': 'agentReport',
+    'Dependency Assistant': 'agentReport',
+    'Architecture Suggestions': 'agentReport',
+    'Test Generation Agent': 'agentReport',
+    'Executive Report': 'agentReport',
+    'Manual Fix List': 'list',
+    'Change Log': 'list',
+  };
+  const reportKindByTitle = {
+    'Migration Summary': 'executive',
+    'Dependency Map': 'dependencies',
+    'Validation Report': 'build-fixer',
+    'Migration Diff': 'diff',
+    'Code Rewrite Preview': 'rewrite',
+    'Build Error AI Fixer': 'build-fixer',
+    'Dependency Assistant': 'dependencies',
+    'Architecture Suggestions': 'architecture',
+    'Test Generation Agent': 'tests',
+    'Executive Report': 'executive',
+    'Manual Fix List': 'build-fixer',
+    'Change Log': 'diff',
+  };
+  return { title, type: typeByTitle[title] || 'json', reportKind: reportKindByTitle[title] || 'executive', data };
+}
+
+function getStageIndex(job) {
+  if (!job) return -1;
+  if (job.status === 'completed' || job.status === 'needs_review') return 4;
+  const map = {
+    queued: 0,
+    ingest: 0,
+    inventory: 1,
+    'upgrade-projects': 2,
+    'rewrite-code': 2,
+    validate: 3,
+    package: 4,
+    completed: 4,
+    'needs-review': 4,
+    failed: 4,
+  };
+  return map[job.stage] ?? 0;
+}
+
+function getStepState(index, stageIndex, job) {
+  if (!job || stageIndex < 0) return 'pending';
+  if (job.status === 'completed' || job.status === 'needs_review') return 'completed';
+  if (index < stageIndex) return 'completed';
+  if (index === stageIndex) return 'active';
+  return 'pending';
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || data.error || response.statusText);
+  return data;
+}
+
+async function postForm(url, form) {
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', body: form });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(`${API_BASE}${url}`, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+createRoot(document.getElementById('root')).render(<App />);

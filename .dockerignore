@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+.python_packages
+.python_runtime
+uploads
+workspaces
+outputs
+frontend/node_modules
+frontend/dist
+server.log
+server.err.log
+*.zip
