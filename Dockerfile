@@ -1,39 +1,46 @@
-FROM node:20-bookworm-slim AS frontend-builder
+# ── Stage 1: Build React frontend ────────────────────────────────────────
+FROM node:20-slim AS frontend-builder
 
-WORKDIR /app/frontend
+WORKDIR /frontend
 
 COPY frontend/package*.json ./
 RUN npm ci
 
-COPY frontend ./
-RUN npm run build
+COPY frontend/ ./
+
+# Override outDir to a fixed location inside this stage
+RUN npx vite build --outDir /frontend-dist --emptyOutDir
 
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
+# ── Stage 2: Python + .NET 8 ─────────────────────────────────────────────
+FROM python:3.11-slim-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV RENDER=true
-ENV PORT=8050
-ENV PATH="/opt/venv/bin:${PATH}"
-
-WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates \
-    && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip \
+# Install .NET 8 SDK
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget apt-transport-https ca-certificates \
+    && wget https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O /tmp/dotnet.deb \
+    && dpkg -i /tmp/dotnet.deb \
+    && rm /tmp/dotnet.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends dotnet-sdk-8.0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+WORKDIR /app
+
+# Python deps
+COPY MigrationAgent.API/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY backend ./backend
-COPY run_fastapi.py ./
-COPY README.md ./
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# Backend source
+COPY MigrationAgent.API/ .
 
-EXPOSE 8050
+# Frontend build output → where FastAPI serves it from
+COPY --from=frontend-builder /frontend-dist ./frontend/dist
 
-CMD ["python", "-B", "run_fastapi.py"]
+# Runtime directories
+RUN mkdir -p uploads outputs/migrated
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

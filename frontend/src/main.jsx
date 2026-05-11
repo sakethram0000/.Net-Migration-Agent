@@ -1,8 +1,8 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 const steps = ['Ingest', 'Analyze', 'Transform', 'Validate', 'Package'];
 
 function App() {
@@ -20,7 +20,14 @@ function App() {
   const [selectedOutput, setSelectedOutput] = useState(null);
   const [appRuntime, setAppRuntime] = useState({ status: 'stopped', url: '', logs: [] });
   const [smokeTest, setSmokeTest] = useState(null);
+  const [ollamaStatus, setOllamaStatus] = useState(null);
   const inputRef = useRef(null);
+
+  useEffect(() => {
+    fetchJson('/api/ollama/status')
+      .then((data) => setOllamaStatus(data))
+      .catch(() => setOllamaStatus({ connected: false, status: 'unreachable' }));
+  }, []);
 
   const scopes = useMemo(() => ['Project files', 'Source code', 'Packages', 'Config', 'Build fix', 'Tests'], []);
   const stageIndex = getStageIndex(job);
@@ -48,10 +55,10 @@ function App() {
     if (!githubUrl.trim()) return;
     setBusy('github');
     try {
-      const data = await postJson('/api/files/github', { url: githubUrl });
-      setFiles([{ name: data.repo, type: 'github', size: data.inventory?.total_file_count || 0 }]);
-      setInventory(data.inventory);
+      const data = await postJson('/api/files/upload-github', { url: githubUrl });
+      setFiles([{ name: data.repo, type: 'github', size: data.total_files || 0 }]);
       log(`Fetched ${data.repo} from ${data.branch}.`);
+      await runAnalyze();
     } catch (err) {
       log(`GitHub fetch failed: ${err.message}`);
     } finally {
@@ -77,10 +84,9 @@ function App() {
     setReport(null);
     setSelectedOutput(null);
     try {
-      const data = await postJson('/api/migration/start', {
+      const data = await postJson('/api/migration/migrate', {
         from_version: fromVersion,
         to_version: toVersion,
-        scopes: Object.fromEntries(scopes.map((scope) => [scope, true]))
       });
       log(`Migration job queued: ${data.job_id}`);
       poll(data.job_id);
@@ -91,16 +97,25 @@ function App() {
   }
 
   async function poll(jobId) {
+    let lastProgress = '';
     for (let i = 0; i < 360; i += 1) {
       const data = await fetchJson(`/api/migration/status/${jobId}`);
       setJob(data);
-      log(`${data.stage}: ${data.progress}`);
+      const msg = `${data.stage}: ${data.progress}`;
+      if (msg !== lastProgress) {
+        log(msg);
+        lastProgress = msg;
+      }
       if (['completed', 'needs_review', 'failed'].includes(data.status)) {
         setBusy('');
-        try {
-          setReport(await fetchJson(`/api/migration/report/${jobId}`));
-        } catch {
-          setReport(data.report || null);
+        if (data.status === 'failed') {
+          log(`Migration failed: ${data.error || 'Unknown error'}`);
+        } else {
+          try {
+            setReport(await fetchJson('/api/migration/report'));
+          } catch {
+            setReport(data.result || null);
+          }
         }
         return;
       }
@@ -112,16 +127,16 @@ function App() {
 
   async function loadRuntime() {
     const data = await fetchJson('/health');
-    setRuntime(data.runtime);
+    setRuntime(data.runtime ?? null);
   }
 
   async function startMigratedApp() {
     if (!job?.job_id) return;
     setBusy('runtime');
     try {
-      const data = await fetchJson(`/api/runtime/start/${job.job_id}`, { method: 'POST' });
+      const data = await fetchJson(`/api/migration/run/${job.job_id}`, { method: 'POST' });
       setAppRuntime(data);
-      log(`Migrated app runtime: ${data.status} ${data.url || ''}`);
+      log(`Runtime: ${data.status} ${data.url || ''}`);
     } catch (err) {
       log(`Runtime start failed: ${err.message}`);
     } finally {
@@ -131,22 +146,30 @@ function App() {
 
   async function stopMigratedApp() {
     if (!job?.job_id) return;
-    const data = await fetchJson(`/api/runtime/stop/${job.job_id}`, { method: 'POST' });
-    setAppRuntime(data);
-    log('Migrated app stopped.');
+    try {
+      const data = await fetchJson(`/api/migration/run/${job.job_id}/stop`, { method: 'POST' });
+      setAppRuntime(data);
+      log('Migrated app stopped.');
+    } catch (err) {
+      log(`Stop failed: ${err.message}`);
+    }
   }
 
   async function refreshMigratedApp() {
     if (!job?.job_id) return;
-    const data = await fetchJson(`/api/runtime/status/${job.job_id}`);
-    setAppRuntime(data);
+    try {
+      const data = await fetchJson(`/api/migration/run/${job.job_id}`);
+      setAppRuntime(data);
+    } catch (err) {
+      log(`Refresh failed: ${err.message}`);
+    }
   }
 
   async function runSmokeTest() {
     if (!job?.job_id) return;
     setBusy('smoke');
     try {
-      const data = await fetchJson(`/api/runtime/smoke-test/${job.job_id}`, { method: 'POST' });
+      const data = await fetchJson(`/api/migration/run/${job.job_id}/smoke`, { method: 'POST' });
       setSmokeTest(data);
       setAppRuntime(data.runtime || appRuntime);
       log(`Smoke test ${data.status}: ${data.summary}`);
@@ -177,6 +200,7 @@ function App() {
             <span className="hero-pill"><span className="pill-dot purple"></span>OpenAI / Azure OpenAI</span>
             <span className="hero-pill"><span className="pill-dot green"></span>.NET 8/9/10</span>
             <span className="hero-pill"><span className="pill-dot orange"></span>Build Validation</span>
+            <OllamaStatus status={ollamaStatus} />
           </div>
         </div>
       </section>
@@ -266,7 +290,7 @@ function App() {
           <div className="ma-card-header"><div className="ma-card-title">Generated Outputs</div><span className="section-status">{report ? 'Ready' : 'Available after migration'}</span></div>
           <div className="ma-card-body outputs-grid">
             <Output title="Migration Summary" ready={!!report} onClick={() => setSelectedOutput(outputContent('Migration Summary', report))} />
-            <Output title="Dependency Map" ready={!!inventory} onClick={() => setSelectedOutput(outputContent('Dependency Map', inventory))} />
+            <Output title="Dependency Map" ready={!!report?.dependency_map} onClick={() => setSelectedOutput(outputContent('Dependency Map', report.dependency_map))} />
             <Output title="Validation Report" ready={!!report?.validation} onClick={() => setSelectedOutput(outputContent('Validation Report', report.validation))} />
             <Output title="Migration Diff" ready={!!report?.diff} onClick={() => setSelectedOutput(outputContent('Migration Diff', report.diff))} />
             <Output title="Code Rewrite Preview" ready={!!report?.code_rewrite_previews} onClick={() => setSelectedOutput(outputContent('Code Rewrite Preview', report.code_rewrite_previews))} />
@@ -277,7 +301,7 @@ function App() {
             <Output title="Executive Report" ready={!!report?.executive_report} onClick={() => setSelectedOutput(outputContent('Executive Report', report.executive_report))} />
             <Output title="Manual Fix List" ready={!!report} onClick={() => setSelectedOutput(outputContent('Manual Fix List', report?.manual_fixes || []))} />
             <Output title="Change Log" ready={!!report} onClick={() => setSelectedOutput(outputContent('Change Log', report?.changes || []))} />
-            <Output title="Migrated Project Zip" ready={!!job?.download_path} onClick={() => window.location.href = `${API_BASE}/api/migration/download/${job.job_id}`} />
+            <Output title="Migrated Project Zip" ready={job?.status === 'completed'} onClick={() => window.location.href = `${API_BASE}/api/files/download`} />
           </div>
           {selectedOutput && <OutputDetail output={selectedOutput} jobId={job?.job_id} />}
         </section>
@@ -289,11 +313,12 @@ function App() {
           </div>
           <div className="ma-card-body runtime-panel">
             <div className="runtime-actions">
-              <button className="run-btn compact-run" disabled={!job?.download_path || busy === 'runtime'} onClick={startMigratedApp}>{busy === 'runtime' ? 'Starting...' : 'Run Migrated App'}</button>
+              <button className="run-btn compact-run" disabled={job?.status !== 'completed' || busy === 'runtime'} onClick={startMigratedApp}>{busy === 'runtime' ? 'Starting...' : 'Run Migrated App'}</button>
               <button className="secondary-run inline" disabled={!job?.job_id} onClick={refreshMigratedApp}>Refresh Logs</button>
-              <button className="secondary-run inline smoke" disabled={!job?.download_path || busy === 'smoke'} onClick={runSmokeTest}>{busy === 'smoke' ? 'Testing...' : 'Run Smoke Test'}</button>
+              <button className="secondary-run inline smoke" disabled={job?.status !== 'completed' || busy === 'smoke'} onClick={runSmokeTest}>{busy === 'smoke' ? 'Testing...' : 'Run Smoke Test'}</button>
               <button className="secondary-run inline danger" disabled={!job?.job_id} onClick={stopMigratedApp}>Stop</button>
             </div>
+            <AppStatusMessage runtime={appRuntime} smokeTest={smokeTest} />
             {smokeTest && <SmokeTestResult smokeTest={smokeTest} />}
             <div className="runtime-url">
               <span>Application URL</span>
@@ -389,14 +414,15 @@ function OutputDetail({ output, jobId }) {
       <div className="detail-head">
         <h2>{output.title}</h2>
         <div className="report-actions">
-          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/preview`} target="_blank" rel="noreferrer">Preview Report</a>}
-          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/download?format=csv`}>Download CSV</a>}
-          {jobId && <a href={`${API_BASE}/api/reports/${jobId}/${output.reportKind}/download?format=html`}>Download HTML/PDF</a>}
+          {jobId && <a href={`${API_BASE}/api/migration/report`} target="_blank" rel="noreferrer">Preview Report</a>}
+          {jobId && <a href={`${API_BASE}/api/migration/report`}>Download CSV</a>}
+          {jobId && <a href={`${API_BASE}/api/migration/report`}>Download HTML/PDF</a>}
           <button onClick={() => downloadJson(`${output.title.toLowerCase().replaceAll(' ', '-')}.json`, output.data)}>JSON</button>
         </div>
       </div>
       {output.type === 'summary' && <SummaryDetail report={output.data} />}
       {output.type === 'dependency' && <DependencyDetail inventory={output.data} />}
+      {output.type === 'depmap' && <DependencyMapDetail depmap={output.data} />}
       {output.type === 'validation' && <ValidationDetail validation={output.data} />}
       {output.type === 'diff' && <DiffDetail diff={output.data} />}
       {output.type === 'rewrite' && <RewritePreviewDetail items={output.data} />}
@@ -493,7 +519,7 @@ function Card({ label, value }) {
 function outputContent(title, data) {
   const typeByTitle = {
     'Migration Summary': 'summary',
-    'Dependency Map': 'dependency',
+    'Dependency Map': 'depmap',
     'Validation Report': 'validation',
     'Migration Diff': 'diff',
     'Code Rewrite Preview': 'rewrite',
@@ -529,6 +555,7 @@ function getStageIndex(job) {
     queued: 0,
     ingest: 0,
     inventory: 1,
+    migrating: 2,
     'upgrade-projects': 2,
     'rewrite-code': 2,
     validate: 3,
@@ -576,6 +603,66 @@ function downloadJson(filename, data) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+function OllamaStatus({ status }) {
+  if (!status) return <span className="hero-pill"><span className="pill-dot" style={{ background: '#888' }}></span>Backend: checking...</span>;
+  const connected = status.connected;
+  return (
+    <span className="hero-pill">
+      <span className="pill-dot" style={{ background: connected ? '#22c55e' : '#ef4444' }}></span>
+      Backend: {connected ? `${status.status} — ${status.model}` : status.status}
+    </span>
+  );
+}
+
+function AppStatusMessage({ runtime, smokeTest }) {
+  if (!runtime || runtime.status === 'stopped') return null;
+
+  const statusConfig = {
+    starting:    { color: '#f59e0b', icon: '...', text: 'Starting up',                    reason: 'The migrated app is launching. This may take a few seconds.' },
+    running:     { color: '#22c55e', icon: 'OK',  text: 'App is running',                  reason: 'The migrated app started and is listening. Run a smoke test to verify the endpoints.' },
+    needs_setup: { color: '#f59e0b', icon: '!',   text: 'Setup required before running',   reason: (runtime.logs || []).filter(l => l.trim()).join(' ') },
+    exited:      { color: '#ef4444', icon: 'X',   text: 'App exited unexpectedly',          reason: 'The app started but crashed — usually a missing database or misconfigured connection string. Download the zip, fix the config, and run locally.' },
+    failed:      { color: '#ef4444', icon: 'X',   text: 'App failed to start',              reason: runtime.logs?.find(l => l.includes('error') || l.includes('Error') || l.includes('Cannot open')) || 'Could not start. Check that .NET SDK is installed and the project builds cleanly.' },
+    stopped:     { color: '#6b7280', icon: '-',   text: 'App stopped',                      reason: 'The application was stopped.' },
+  };
+
+  const cfg = statusConfig[runtime.status] || { color: '#6b7280', icon: '?', text: runtime.status, reason: '' };
+
+  const smokeColor = !smokeTest ? null
+    : smokeTest.status === 'passed'       ? '#22c55e'
+    : smokeTest.status === 'needs_review' ? '#f59e0b'
+    : '#ef4444';
+  const smokeText = !smokeTest ? null
+    : smokeTest.status === 'passed'       ? 'Smoke test passed — all required endpoints responded correctly'
+    : smokeTest.status === 'needs_review' ? 'Smoke test needs review — some endpoints returned unexpected responses'
+    : 'Smoke test failed — app did not respond';
+
+  return (
+    <div style={{ margin: '12px 0', padding: '12px 16px', borderRadius: '8px', borderLeft: `4px solid ${smokeColor || cfg.color}`, background: '#f8fafc' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, color: smokeColor || cfg.color }}>
+        <span style={{ fontSize: '16px' }}>{cfg.icon}</span>
+        <span>{smokeText || cfg.text}</span>
+      </div>
+      <div style={{ marginTop: '4px', fontSize: '13px', color: '#475569' }}>{cfg.reason}</div>
+    </div>
+  );
+}
+
+function DependencyMapDetail({ depmap }) {
+  const entries = Object.entries(depmap || {});
+  if (!entries.length) return <div className="detail-list"><div>No dependencies detected in migrated output.</div></div>;
+  return (
+    <div className="dependency-detail">
+      {entries.map(([pkg, version]) => (
+        <div className="dep-card" key={pkg}>
+          <strong>{pkg}</strong>
+          <span>{version}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 createRoot(document.getElementById('root')).render(<App />);

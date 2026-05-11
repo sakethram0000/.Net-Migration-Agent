@@ -2,13 +2,14 @@ services:
   - type: web
     name: dotnet-migration-agent
     runtime: docker
-    plan: free
     dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
     healthCheckPath: /health
     envVars:
-      - key: RENDER
-        value: "true"
-      - key: PORT
-        value: "8050"
-      - key: PYTHONUNBUFFERED
-        value: "1"
+      - key: GROQ_API_KEY_1
+        sync: false
+      - key: GROQ_API_KEY_2
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
