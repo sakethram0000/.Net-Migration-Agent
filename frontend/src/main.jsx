@@ -105,7 +105,7 @@ function App() {
 
   async function poll(jobId) {
     let lastProgress = '';
-    for (let i = 0; i < 360; i += 1) {
+    for (let i = 0; i < 720; i += 1) {
       const data = await fetchJson(`/api/migration/status/${jobId}`);
       setJob(data);
       const msg = `${data.stage}: ${data.progress}`;

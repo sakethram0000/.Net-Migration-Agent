@@ -134,7 +134,7 @@ def pre_build_clean(output_dir: str, progress_callback=None) -> list:
 
 # ── Layer 2: Build loop with auto-fix ─────────────────────────────────────
 
-def _run(cmd: list, cwd: str, timeout: int = 180) -> subprocess.CompletedProcess:
+def _run(cmd: list, cwd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
     )
