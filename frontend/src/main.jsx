@@ -274,7 +274,7 @@ function App() {
           {selectedOutput && <OutputDetail output={selectedOutput} jobId={job?.job_id} />}
         </section>
 
-        <TokenUtilization stats={tokenStats} />
+        {job?.status === 'completed' && <TokenUtilization stats={tokenStats} />}
       </main>
     </>
   );
