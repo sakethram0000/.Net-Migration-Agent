@@ -10,6 +10,7 @@ from agents.blazor_migrator import run_blazor_migrator
 from agents.build_validator import run_build_validator
 from agents.validator import validate
 from agents.reporter import generate_report
+from agents.llm import reset_token_stats, increment_execution, get_token_stats
 import uuid
 import socket
 import subprocess
@@ -44,6 +45,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         migration_jobs[job_id]["status"] = "running"
         migration_jobs[job_id]["stage"] = "migrating"
         migration_jobs[job_id]["progress"] = "Starting migration..."
+        reset_token_stats()
 
         def update_progress(message: str):
             migration_jobs[job_id]["progress"] = message
@@ -60,6 +62,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
 
         # Step 1 — LLM Migration
         result = migrate(upload_dir, from_version, to_version, progress_callback=update_progress)
+        increment_execution()
 
         if not result["success"]:
             migration_jobs[job_id]["status"] = "failed"
@@ -158,6 +161,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         migration_jobs[job_id]["result"]["webforms_migration"] = webforms_result
         migration_jobs[job_id]["result"]["blazor_migration"] = blazor_result
         migration_jobs[job_id]["result"]["build_validation"] = build_result
+        migration_jobs[job_id]["token_stats"] = get_token_stats()
         build_passed = build_result.get("success", False)
         migration_jobs[job_id]["progress"] = (
             f"Migration completed. {result['count']} files migrated. "
@@ -210,6 +214,15 @@ def get_migration_status(job_id: str):
 @router.post("/validate")
 def run_validation():
     return validate(output_dir=OUTPUT_DIR, progress_callback=None)
+
+@router.get("/token-stats/{job_id}")
+def get_token_stats_endpoint(job_id: str):
+    if job_id not in migration_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return migration_jobs[job_id].get("token_stats", {
+        "total_tokens": 0, "total_executions": 0, "total_llm_calls": 0,
+        "avg_tokens_per_execution": 0, "avg_tokens_per_llm_call": 0
+    })
 
 @router.get("/report")
 def get_report():

@@ -5,6 +5,28 @@ import re
 
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
+# ── Token tracking ────────────────────────────────────────────────────────
+_stats = {"total_tokens": 0, "total_llm_calls": 0, "total_executions": 0}
+
+def reset_token_stats():
+    _stats["total_tokens"] = 0
+    _stats["total_llm_calls"] = 0
+    _stats["total_executions"] = 0
+
+def increment_execution():
+    _stats["total_executions"] += 1
+
+def get_token_stats() -> dict:
+    calls = _stats["total_llm_calls"]
+    execs = _stats["total_executions"]
+    return {
+        "total_tokens":            _stats["total_tokens"],
+        "total_executions":        execs,
+        "total_llm_calls":         calls,
+        "avg_tokens_per_execution": round(_stats["total_tokens"] / execs, 1) if execs else 0,
+        "avg_tokens_per_llm_call": round(_stats["total_tokens"] / calls, 1) if calls else 0,
+    }
+
 def _load_api_keys() -> list[str]:
     keys = []
     # Support GROQ_API_KEY_1, GROQ_API_KEY_2, ... for multiple keys
@@ -37,6 +59,10 @@ def _chat(messages: list) -> str:
                     temperature=0.2,
                     max_tokens=4096,
                 )
+                usage = getattr(response, "usage", None)
+                if usage:
+                    _stats["total_tokens"] += getattr(usage, "total_tokens", 0)
+                _stats["total_llm_calls"] += 1
                 return response.choices[0].message.content
             except Exception as e:
                 last_error = e

@@ -18,8 +18,7 @@ function App() {
   const [busy, setBusy] = useState('');
   const [runtime, setRuntime] = useState(null);
   const [selectedOutput, setSelectedOutput] = useState(null);
-  const [appRuntime, setAppRuntime] = useState({ status: 'stopped', url: '', logs: [] });
-  const [smokeTest, setSmokeTest] = useState(null);
+  const [tokenStats, setTokenStats] = useState(null);
   const [ollamaStatus, setOllamaStatus] = useState(null);
   const inputRef = useRef(null);
 
@@ -123,6 +122,7 @@ function App() {
           } catch {
             setReport(data.result || null);
           }
+          fetchTokenStats(jobId);
         }
         return;
       }
@@ -137,53 +137,12 @@ function App() {
     setRuntime(data.runtime ?? null);
   }
 
-  async function startMigratedApp() {
-    if (!job?.job_id) return;
-    setBusy('runtime');
+  async function fetchTokenStats(jobId) {
     try {
-      const data = await fetchJson(`/api/migration/run/${job.job_id}`, { method: 'POST' });
-      setAppRuntime(data);
-      log(`Runtime: ${data.status} ${data.url || ''}`);
-    } catch (err) {
-      log(`Runtime start failed: ${err.message}`);
-    } finally {
-      setBusy('');
-    }
-  }
-
-  async function stopMigratedApp() {
-    if (!job?.job_id) return;
-    try {
-      const data = await fetchJson(`/api/migration/run/${job.job_id}/stop`, { method: 'POST' });
-      setAppRuntime(data);
-      log('Migrated app stopped.');
-    } catch (err) {
-      log(`Stop failed: ${err.message}`);
-    }
-  }
-
-  async function refreshMigratedApp() {
-    if (!job?.job_id) return;
-    try {
-      const data = await fetchJson(`/api/migration/run/${job.job_id}`);
-      setAppRuntime(data);
-    } catch (err) {
-      log(`Refresh failed: ${err.message}`);
-    }
-  }
-
-  async function runSmokeTest() {
-    if (!job?.job_id) return;
-    setBusy('smoke');
-    try {
-      const data = await fetchJson(`/api/migration/run/${job.job_id}/smoke`, { method: 'POST' });
-      setSmokeTest(data);
-      setAppRuntime(data.runtime || appRuntime);
-      log(`Smoke test ${data.status}: ${data.summary}`);
-    } catch (err) {
-      log(`Smoke test failed: ${err.message}`);
-    } finally {
-      setBusy('');
+      const data = await fetchJson(`/api/migration/token-stats/${jobId}`);
+      setTokenStats(data);
+    } catch {
+      // silently ignore
     }
   }
 
@@ -244,12 +203,12 @@ function App() {
                 <button className={uploadMode === 'github' ? 'active' : ''} onClick={() => setUploadMode('github')}>GitHub URL</button>
               </div>
               {uploadMode === 'local' ? (
-                <div className="upload-zone" onClick={() => inputRef.current?.click()}>
+                <div className="upload-zone" onClick={() => { inputRef.current?.click(); }}>
                   <div className="upload-icon">ZIP</div>
                   <h3>Drop or browse for .zip, .sln, .csproj, .cs files</h3>
                   <p>The backend ignores .git, bin, obj, packages, and node_modules.</p>
                   <input ref={inputRef} hidden type="file" multiple accept=".zip,.sln,.csproj,.cs,.config,.json,.razor,.cshtml" onChange={uploadSelected} />
-                  <button className="browse-btn">{busy === 'upload' ? 'Uploading...' : 'Browse Files'}</button>
+                    <button className="browse-btn">{busy === 'upload' ? 'Uploading...' : 'Browse Files'}</button>
                 </div>
               ) : (
                 <div className="github-input-area">
@@ -264,7 +223,7 @@ function App() {
           <article className="ma-card">
             <div className="ma-card-header"><div className="ma-card-title">Migration Controls</div></div>
             <div className="ma-card-body">
-              <div className="scope-grid">{scopes.map((s) => <div className="scope-card on" key={s.key}><div className="si">{String(s.value()).slice(0, 4)}</div><div className="sl">{s.label}</div></div>)}</div>
+              <div className="scope-grid">{scopes.map((s) => { const val = s.value(); const active = val !== 0 && val !== '—' && val !== '0'; return <div className={`scope-card ${active ? 'on' : 'idle'}`} key={s.key}><div className="si">{String(val).slice(0, 4)}</div><div className="sl">{s.label}</div></div>; })}</div>
               <button className="run-btn" disabled={!files.length || busy === 'migration'} onClick={startMigration}>{busy === 'migration' ? 'Migration running...' : 'Run Migration'}</button>
               <button className="secondary-run" disabled={!files.length} onClick={runAnalyze}>Refresh Analysis</button>
               {runtime && <div className="runtime-box">{runtime.agent_framework.detail}<br />LLM: {runtime.llm.provider} / {runtime.llm.model}</div>}
@@ -315,27 +274,7 @@ function App() {
           {selectedOutput && <OutputDetail output={selectedOutput} jobId={job?.job_id} />}
         </section>
 
-        <section className="ma-card">
-          <div className="ma-card-header">
-            <div className="ma-card-title">Run Migrated Application</div>
-            <span className="section-status">{appRuntime.status}</span>
-          </div>
-          <div className="ma-card-body runtime-panel">
-            <div className="runtime-actions">
-              <button className="run-btn compact-run" disabled={job?.status !== 'completed' || busy === 'runtime'} onClick={startMigratedApp}>{busy === 'runtime' ? 'Starting...' : 'Run Migrated App'}</button>
-              <button className="secondary-run inline" disabled={!job?.job_id} onClick={refreshMigratedApp}>Refresh Logs</button>
-              <button className="secondary-run inline smoke" disabled={job?.status !== 'completed' || busy === 'smoke'} onClick={runSmokeTest}>{busy === 'smoke' ? 'Testing...' : 'Run Smoke Test'}</button>
-              <button className="secondary-run inline danger" disabled={!job?.job_id} onClick={stopMigratedApp}>Stop</button>
-            </div>
-            <AppStatusMessage runtime={appRuntime} smokeTest={smokeTest} />
-            {smokeTest && <SmokeTestResult smokeTest={smokeTest} />}
-            <div className="runtime-url">
-              <span>Application URL</span>
-              {appRuntime.url && appRuntime.status === 'running' ? <a href={appRuntime.url} target="_blank" rel="noreferrer">{appRuntime.url}</a> : <strong>{appRuntime.url ? `${appRuntime.url} (${appRuntime.status})` : 'Available after runtime starts'}</strong>}
-            </div>
-            <pre className="runtime-logs">{(appRuntime.logs || []).join('\n') || 'Runtime logs will appear here after you start the migrated app.'}</pre>
-          </div>
-        </section>
+        <TokenUtilization stats={tokenStats} />
       </main>
     </>
   );
@@ -698,7 +637,8 @@ async function postForm(url, form) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(`${API_BASE}${url}`, options);
+  const opts = options;
+  const response = await fetch(`${API_BASE}${url}`, opts);
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
   return data;
@@ -899,6 +839,39 @@ function UiWarningBanner({ profile }) {
         {profile.has_bundling && <div style={{ fontSize: 12, color: c.text, marginTop: 2 }}>Script bundling detected — will be converted to standard script references.</div>}
       </div>
     </div>
+  );
+}
+
+function TokenUtilization({ stats }) {
+  const cards = [
+    { label: 'Total Tokens',           value: stats?.total_tokens,            icon: '⚡', accent: 'var(--brand)' },
+    { label: 'Total Executions',       value: stats?.total_executions,        icon: '🔁', accent: 'var(--apple-strong)' },
+    { label: 'Avg Tokens / Execution', value: stats?.avg_tokens_per_execution, icon: '📊', accent: 'var(--sunset-strong)' },
+    { label: 'Total LLM Calls',        value: stats?.total_llm_calls,         icon: '🤖', accent: '#7c3aed' },
+    { label: 'Avg Tokens / LLM Call',  value: stats?.avg_tokens_per_llm_call, icon: '📈', accent: 'var(--red)' },
+  ];
+  const maxVal = Math.max(1, ...cards.map((c) => Number(c.value) || 0));
+  return (
+    <section className="ma-card">
+      <div className="ma-card-header">
+        <div className="ma-card-title">Token Utilization</div>
+        <span className="section-status">{stats ? 'Live Data' : 'Available after migration'}</span>
+      </div>
+      <div className="ma-card-body">
+        <div className="token-grid">
+          {cards.map((c) => (
+            <div className={`token-card ${!stats ? 'token-skeleton' : ''}`} key={c.label} style={{ '--accent': c.accent }}>
+              <div className="token-icon">{c.icon}</div>
+              <div className="token-value">{stats ? Number(c.value).toLocaleString() : '—'}</div>
+              <div className="token-label">{c.label}</div>
+              <div className="token-bar-track">
+                <div className="token-bar-fill" style={{ width: stats ? `${Math.round((Number(c.value) / maxVal) * 100)}%` : '0%' }}></div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
