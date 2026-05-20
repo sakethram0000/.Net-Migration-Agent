@@ -1,4 +1,4 @@
-from agents.llm import ask_with_system
+from agents.llm import ask_with_system, increment_execution
 from pathlib import Path
 import re
 import time
@@ -235,6 +235,7 @@ Rules:
         if progress_callback:
             progress_callback("Reviewing merged Program.cs...")
         merged_code = review_code(merged_code, program_path)
+        increment_execution()
         time.sleep(1)
 
         out_path = output_dir / program_path
@@ -268,6 +269,7 @@ Rules:
         if progress_callback:
             progress_callback("Reviewing Program.cs...")
         program_code = review_code(program_code, program_path)
+        increment_execution()
         time.sleep(1)
 
         out_path = output_dir / program_path
@@ -350,6 +352,7 @@ Return ONLY the migrated XML in a ```xml block."""
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(code, encoding="utf-8")
         migrated[relative_path] = code
+        increment_execution()
 
         if progress_callback:
             progress_callback(f"Saved {relative_path} ({index}/{total_files})")

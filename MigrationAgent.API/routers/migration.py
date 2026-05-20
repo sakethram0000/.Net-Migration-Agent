@@ -10,7 +10,7 @@ from agents.blazor_migrator import run_blazor_migrator
 from agents.build_validator import run_build_validator
 from agents.validator import validate
 from agents.reporter import generate_report
-from agents.llm import reset_token_stats, increment_execution, get_token_stats
+from agents.llm import reset_token_stats, get_token_stats
 import uuid
 import socket
 import subprocess
@@ -62,7 +62,6 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
 
         # Step 1 — LLM Migration
         result = migrate(upload_dir, from_version, to_version, progress_callback=update_progress)
-        increment_execution()
 
         if not result["success"]:
             migration_jobs[job_id]["status"] = "failed"
