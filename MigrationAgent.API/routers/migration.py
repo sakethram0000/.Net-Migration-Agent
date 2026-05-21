@@ -11,6 +11,7 @@ from agents.build_validator import run_build_validator
 from agents.validator import validate
 from agents.reporter import generate_report
 from agents.llm import reset_token_stats, get_token_stats
+from agents.guardrail_agent import run_guardrails
 import uuid
 import socket
 import subprocess
@@ -128,7 +129,8 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
             fix_result = run_fixes(
                 output_dir=OUTPUT_DIR,
                 upload_dir=upload_dir,
-                progress_callback=update_progress
+                progress_callback=update_progress,
+                to_version=to_version
             )
             fix_count = fix_result.get("count", 0)
             manual_fixes = fix_result.get("manual_fixes", [])
@@ -137,7 +139,18 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
             fix_count = 0
             update_progress(f"Fix Agent warning: {str(fe)}")
 
-        # Step 6 — Build Validator (pre-clean + build loop + auto-fix)
+        # Step 7 — Guardrail Agent (read-only scan)
+        update_progress("Guardrail Agent: Scanning architecture and code quality...")
+        guardrail_result = {}
+        try:
+            guardrail_result = run_guardrails(
+                output_dir=OUTPUT_DIR,
+                progress_callback=update_progress
+            )
+        except Exception as ge:
+            update_progress(f"Guardrail Agent warning: {str(ge)}")
+
+        # Step 8 — Build Validator (pre-clean + build loop + auto-fix)
         update_progress("Build Validator: Starting pre-build cleanup and validation...")
         build_result = {}
         try:
@@ -160,6 +173,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         migration_jobs[job_id]["result"]["webforms_migration"] = webforms_result
         migration_jobs[job_id]["result"]["blazor_migration"] = blazor_result
         migration_jobs[job_id]["result"]["build_validation"] = build_result
+        migration_jobs[job_id]["result"]["guardrails"] = guardrail_result
         migration_jobs[job_id]["token_stats"] = get_token_stats()
         build_passed = build_result.get("success", False)
         migration_jobs[job_id]["progress"] = (

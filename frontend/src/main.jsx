@@ -223,7 +223,7 @@ function App() {
           <article className="ma-card">
             <div className="ma-card-header"><div className="ma-card-title">Migration Controls</div></div>
             <div className="ma-card-body">
-              <div className="scope-grid">{scopes.map((s) => { const val = s.value(); const active = val !== 0 && val !== '—' && val !== '0'; return <div className={`scope-card ${active ? 'on' : 'idle'}`} key={s.key}><div className="si">{String(val).slice(0, 4)}</div><div className="sl">{s.label}</div></div>; })}</div>
+              <div className="scope-grid">{scopes.map((s) => <div className="scope-card on" key={s.key}><div className="si">{String(s.value()).slice(0, 4)}</div><div className="sl">{s.label}</div></div>)}</div>
               <button className="run-btn" disabled={!files.length || busy === 'migration'} onClick={startMigration}>{busy === 'migration' ? 'Migration running...' : 'Run Migration'}</button>
               <button className="secondary-run" disabled={!files.length} onClick={runAnalyze}>Refresh Analysis</button>
               {runtime && <div className="runtime-box">{runtime.agent_framework.detail}<br />LLM: {runtime.llm.provider} / {runtime.llm.model}</div>}
@@ -267,6 +267,7 @@ function App() {
             <Output title="Executive Report" ready={!!report?.executive_report} onClick={() => setSelectedOutput(outputContent('Executive Report', report.executive_report))} />
             <Output title="Manual Fix List" ready={!!report} onClick={() => setSelectedOutput(outputContent('Manual Fix List', report?.manual_fixes || []))} />
             <Output title="Auth Migration Report" ready={!!report?.auth_migration?.status} onClick={() => setSelectedOutput(outputContent('Auth Migration Report', report.auth_migration))} />
+            <Output title="Architecture Guardrails" ready={!!report?.guardrails} onClick={() => setSelectedOutput(outputContent('Architecture Guardrails', report.guardrails))} />
             <Output title="UI Migration Report" ready={!!report} onClick={() => setSelectedOutput(outputContent('UI Migration Report', { view: report?.view_migration, webforms: report?.webforms_migration, blazor: report?.blazor_migration }))} />
             <Output title="Change Log" ready={!!report} onClick={() => setSelectedOutput(outputContent('Change Log', report?.changes || []))} />
             <Output title="Migrated Project Zip" ready={job?.status === 'completed'} onClick={() => window.location.href = `${API_BASE}/api/files/download`} />
@@ -472,6 +473,7 @@ function OutputDetail({ output, jobId }) {
       {output.type === 'agentReport' && <AgentReportDetail report={output.data} />}
       {output.type === 'list' && <ListDetail items={output.data} />}
       {output.type === 'auth' && <AuthMigrationDetail auth={output.data} />}
+      {output.type === 'guardrails' && <GuardrailDetail data={output.data} />}
       {output.type === 'uimigration' && <UiMigrationDetail data={output.data} />}
       <pre className="detail-json">{JSON.stringify(output.data, null, 2)}</pre>
     </section>
@@ -535,23 +537,6 @@ function FileList({ title, files }) {
   return <article className="diff-list"><strong>{title}</strong>{files.length ? files.slice(0, 12).map((file) => <span key={file}>{file}</span>) : <span>None</span>}</article>;
 }
 
-function SmokeTestResult({ smokeTest }) {
-  return (
-    <div className={`smoke-result ${smokeTest.status}`}>
-      <div className="smoke-summary"><strong>{smokeTest.summary}</strong><span>{smokeTest.url}</span></div>
-      <div className="smoke-checks">
-        {(smokeTest.checks || []).map((check) => (
-          <div className={`smoke-check ${check.passed ? 'passed' : 'failed'}`} key={check.name}>
-            <strong>{check.passed ? 'PASS' : 'REVIEW'}</strong>
-            <span>{check.name}</span>
-            <em>{check.status_code || 'n/a'}</em>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ListDetail({ items }) {
   const list = Array.isArray(items) ? items : [];
   return <div className="detail-list">{list.length ? list.map((item, index) => <div key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</div>) : <div>No items available.</div>}</div>;
@@ -576,6 +561,7 @@ function outputContent(title, data) {
     'Manual Fix List': 'list',
     'Change Log': 'list',
     'Auth Migration Report': 'auth',
+    'Architecture Guardrails': 'guardrails',
     'UI Migration Report': 'uimigration',
   };
   const reportKindByTitle = {
@@ -872,6 +858,66 @@ function TokenUtilization({ stats }) {
         </div>
       </div>
     </section>
+  );
+}
+
+function GuardrailDetail({ data }) {
+  if (!data) return <div className="detail-list"><div>No guardrail data available.</div></div>;
+  const scoreColor = data.score >= 80 ? '#22c55e' : data.score >= 50 ? '#f59e0b' : '#ef4444';
+  const severityColor = { High: '#ef4444', Medium: '#f59e0b', Low: '#3b82f6' };
+  const high   = (data.violations || []).filter(v => v.severity === 'High');
+  const medium = (data.violations || []).filter(v => v.severity === 'Medium');
+  const low    = (data.violations || []).filter(v => v.severity === 'Low');
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16, padding: '14px 16px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+        <div style={{ width: 64, height: 64, borderRadius: '50%', background: `conic-gradient(${scoreColor} ${data.score}%, #e2e8f0 0)`, display: 'grid', placeItems: 'center', flexShrink: 0, position: 'relative' }}>
+          <div style={{ position: 'absolute', inset: 8, background: '#fff', borderRadius: '50%', display: 'grid', placeItems: 'center' }}>
+            <span style={{ fontWeight: 900, fontSize: 16, color: scoreColor }}>{data.score}</span>
+          </div>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: scoreColor }}>{data.summary}</div>
+          <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{data.passed_count} checks passed · {data.violation_count} violation(s) found</div>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 16 }}>
+        {[['High', high, '#fef2f2', '#ef4444'], ['Medium', medium, '#fffbeb', '#f59e0b'], ['Low', low, '#eff6ff', '#3b82f6']].map(([label, items, bg, color]) => (
+          <div key={label} style={{ padding: '10px 12px', background: bg, borderRadius: 7, border: `1px solid ${color}33` }}>
+            <div style={{ fontWeight: 900, color, fontSize: 20 }}>{items.length}</div>
+            <div style={{ fontSize: 11, fontWeight: 800, color, textTransform: 'uppercase' }}>{label} Severity</div>
+          </div>
+        ))}
+      </div>
+      {data.violations?.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: '#1e293b' }}>Violations</div>
+          {data.violations.map((v, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, padding: '10px 12px', marginBottom: 6, background: '#fff', border: '1px solid #e2e8f0', borderLeft: `4px solid ${severityColor[v.severity] || '#94a3b8'}`, borderRadius: 7 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: '#1e293b' }}>{v.rule}</div>
+                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{v.file}</div>
+                <div style={{ fontSize: 12, color: '#475569', marginTop: 4 }}>💡 {v.suggestion}</div>
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 800, color: severityColor[v.severity], alignSelf: 'flex-start', padding: '2px 8px', background: `${severityColor[v.severity]}18`, borderRadius: 999 }}>{v.severity}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {data.passed?.length > 0 && (
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: '#1e293b' }}>Passed Checks</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 6 }}>
+            {data.passed.map((p, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 7, fontSize: 12 }}>
+                <span style={{ color: '#22c55e', fontWeight: 900 }}>✓</span>
+                <span style={{ color: '#166534' }}>{p.rule}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

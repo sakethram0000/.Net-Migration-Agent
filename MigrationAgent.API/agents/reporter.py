@@ -112,8 +112,8 @@ def generate_report():
     code_rewrite_previews = _build_rewrite_previews(upload_dir, migrated_dir)
 
     # --- validation (use build_validator result if available, else run fresh) ---
-    from agents.build_validator import run_build_validator
-    validation_raw = run_build_validator(str(migrated_dir))
+    from agents.build_validator import build_loop
+    validation_raw = build_loop(str(migrated_dir))
     validation = {
         "success":  validation_raw.get("success", False),
         "stage":    "build",
@@ -282,6 +282,7 @@ def generate_report():
         "architecture_suggestions": architecture_suggestions,
         "generated_tests": generated_tests,
         "executive_report": executive_report,
+        "guardrails": {},
     }
 
 

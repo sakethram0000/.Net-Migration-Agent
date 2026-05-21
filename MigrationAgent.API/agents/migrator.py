@@ -26,6 +26,10 @@ Rules:
 - Replace Response.Redirect with return Redirect()
 - Remove [ValidateAntiForgeryToken] if it causes issues in API controllers
 - Keep all using statements that are valid in .NET 8
+- If a class has no instance state and all methods are utility/helper methods, keep it static — do not convert static classes to instance classes with constructor injection
+- Do NOT add variables that are not in the original code
+- Do NOT add Console.WriteLine or any debug statements
+- Always use async/await for asynchronous code — never use .Result or .Wait() as they cause deadlocks
 - Return ONLY the migrated C# code inside a ```csharp block. Nothing else."""
 
 SYSTEM_PROGRAM = """You are a .NET 8 migration expert. Your job is to produce a single Program.cs using .NET 8 minimal hosting.
@@ -35,17 +39,19 @@ Rules:
 - Move ALL middleware from Startup.Configure into app.Use...
 - End with app.Run()
 - NO Startup class, NO CreateHostBuilder, NO IHostBuilder
+- Never hardcode connection strings or secrets — always use builder.Configuration.GetConnectionString() or builder.Configuration.GetValue()
+- Always wrap app.UseDeveloperExceptionPage() inside if (app.Environment.IsDevelopment())
 - Return ONLY the complete Program.cs code inside a ```csharp block. Nothing else."""
 
-SYSTEM_CSPROJ = """You are a .NET 8 migration expert. Migrate .csproj to .NET 8 SDK style.
+SYSTEM_CSPROJ = """You are a .NET migration expert. Migrate .csproj to the target .NET SDK style.
 Rules:
-- Set <TargetFramework>net8.0</TargetFramework>
+- Set <TargetFramework> to the exact target version specified in the prompt
 - Add <Nullable>enable</Nullable> and <ImplicitUsings>enable</ImplicitUsings>
 - Keep the Sdk attribute on the Project tag exactly as: <Project Sdk="Microsoft.NET.Sdk.Web">
 - REMOVE these packages completely: Microsoft.AspNetCore.SpaServices.Extensions, Npgsql.EntityFrameworkCore.PostgreSQL.Design, Microsoft.AspNet.Mvc, Microsoft.AspNet.WebApi, Microsoft.AspNet.WebPages, Microsoft.Web.Infrastructure
-- Set Microsoft.EntityFrameworkCore and all EF Core packages to Version 8.0.4
-- Set Npgsql.EntityFrameworkCore.PostgreSQL to Version 8.0.4
-- Set Microsoft.AspNetCore.Authentication.JwtBearer to Version 8.0.4
+- Set Microsoft.EntityFrameworkCore and all EF Core packages to the version matching the target .NET version (e.g. 8.0.4 for .NET 8, 9.0.0 for .NET 9, 10.0.0 for .NET 10)
+- Set Npgsql.EntityFrameworkCore.PostgreSQL to the version matching the target .NET version
+- Set Microsoft.AspNetCore.Authentication.JwtBearer to the version matching the target .NET version
 - Set Swashbuckle.AspNetCore to Version 6.5.0
 - Remove any <Target> blocks related to SPA, webpack, or npm
 - Remove any <Reference> items pointing to System.Web or old .NET Framework assemblies
@@ -62,6 +68,10 @@ Rules:
 - Fix any remaining ConfigurationManager — replace with IConfiguration
 - Ensure all using statements are valid for .NET 8
 - Keep ALL business logic intact — do not remove any methods or properties
+- Remove any variables that are declared but never used anywhere in the file
+- Remove any Console.WriteLine or debug statements that were NOT present in the original code
+- If a class has no instance state and all methods are utility/helper methods, keep it static — do not convert static classes to instance classes
+- Fix any duplicate type keywords in method/lambda parameters (e.g. 'double double posLong' should be 'double posLong')
 - If code is already correct, return it as-is
 - Return ONLY the corrected code inside a ```csharp block. Nothing else."""
 

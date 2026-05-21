@@ -40,7 +40,7 @@ app.include_router(migration.router)
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "runtime": None}
 
 # Serve React static assets if the build exists
 if (FRONTEND_DIST / "assets").exists():

@@ -8,7 +8,7 @@ def ollama_status():
     connected = check_connection()
     return {
         "connected": connected,
-        "model": "llama3-70b-8192 (Groq)",
+        "model": "llama-3.3-70b-versatile (Groq)",
         "status": "ready" if connected else "not available"
     }
 

@@ -1,7 +1,7 @@
 """
 Fix Agent — runs after LLM migration, before validation.
 Fixes known structural issues deterministically (no LLM).
-Works for ANY .NET project migration to .NET 8.
+Works for ANY .NET project migration to .NET 8, 9 or 10.
 """
 from pathlib import Path
 import re
@@ -18,20 +18,62 @@ REMOVE_PACKAGES = {
     "Microsoft.Web.Infrastructure",
 }
 
-# Package version overrides for .NET 8
-PACKAGE_VERSIONS = {
-    "Microsoft.EntityFrameworkCore": "8.0.4",
-    "Microsoft.EntityFrameworkCore.Design": "8.0.4",
-    "Microsoft.EntityFrameworkCore.SqlServer": "8.0.4",
-    "Microsoft.EntityFrameworkCore.InMemory": "8.0.4",
-    "Microsoft.EntityFrameworkCore.Sqlite": "8.0.4",
-    "Npgsql.EntityFrameworkCore.PostgreSQL": "8.0.4",
-    "Microsoft.AspNetCore.Authentication.JwtBearer": "8.0.4",
-    "Microsoft.AspNetCore.Identity.EntityFrameworkCore": "8.0.4",
-    "Swashbuckle.AspNetCore": "6.5.0",
-    "AutoMapper": "13.0.1",
-    "AutoMapper.Extensions.Microsoft.DependencyInjection": "13.0.1",
+# Package versions per target .NET version
+# Format: { package_name: { "8": "version", "9": "version", "10": "version" } }
+# Packages with same version across all .NET versions use "default" key
+_PACKAGE_VERSION_MAP = {
+    "Microsoft.EntityFrameworkCore":                        {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.EntityFrameworkCore.Design":                 {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.EntityFrameworkCore.SqlServer":              {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.EntityFrameworkCore.InMemory":               {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.EntityFrameworkCore.Sqlite":                 {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Npgsql.EntityFrameworkCore.PostgreSQL":                {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Authentication.JwtBearer":        {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Identity.EntityFrameworkCore":    {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Authentication.OpenIdConnect":    {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Authentication.Google":           {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Authentication.Facebook":         {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    "Microsoft.AspNetCore.Authentication.Twitter":          {"8": "8.0.4",  "9": "9.0.0",  "10": "10.0.0"},
+    # Version-independent packages
+    "Swashbuckle.AspNetCore":                               {"default": "6.5.0"},
+    "AutoMapper":                                           {"default": "13.0.1"},
+    "AutoMapper.Extensions.Microsoft.DependencyInjection": {"default": "13.0.1"},
+    "Microsoft.Identity.Web":                               {"default": "2.17.5"},
+    "Microsoft.Identity.Web.UI":                            {"default": "2.17.5"},
+    "Microsoft.Identity.Web.MicrosoftGraph":                {"default": "2.17.5"},
+    "Microsoft.ApplicationInsights.AspNetCore":             {"default": "2.22.0"},
+    "Serilog.AspNetCore":                                   {"default": "8.0.1"},
+    "Serilog.Sinks.Console":                                {"default": "5.0.1"},
+    "Serilog.Sinks.File":                                   {"default": "5.0.0"},
+    "MediatR":                                              {"default": "12.2.0"},
+    "MediatR.Extensions.Microsoft.DependencyInjection":     {"default": "11.1.0"},
+    "FluentValidation.AspNetCore":                          {"default": "11.3.0"},
+    "Hangfire.AspNetCore":                                  {"default": "1.8.9"},
 }
+
+
+def _get_package_versions(to_version: str) -> dict:
+    """
+    Build a flat package version dict based on the target .NET version.
+    Extracts major version number from strings like '.NET 8', '.NET 9', '.NET 10'.
+    Falls back to .NET 8 versions if version is unrecognised.
+    """
+    # Extract major version number — works for '.NET 8', '.NET 9', '.NET 10' etc.
+    match = re.search(r'(\d+)', to_version or '')
+    major = match.group(1) if match else "8"
+    # Clamp to supported range 8-10
+    if major not in ("8", "9", "10"):
+        major = "8"
+    result = {}
+    for pkg, versions in _PACKAGE_VERSION_MAP.items():
+        if "default" in versions:
+            result[pkg] = versions["default"]
+        elif major in versions:
+            result[pkg] = versions[major]
+        else:
+            # fallback to .NET 8 version
+            result[pkg] = versions.get("8", "")
+    return result
 
 # Folders to always skip during output scanning
 SKIP_FOLDERS = {"obj", "bin", ".vs", ".git", "node_modules"}
@@ -50,6 +92,15 @@ DEPRECATED_PATTERNS = [
     (r'app\.UseEndpoints\s*\(\s*endpoints\s*=>\s*\{[^}]*endpoints\.MapControllers\s*\(\s*\)\s*;[^}]*\}\s*\)', 'app.MapControllers()'),
     # UseEndpoints with MapControllerRoute → replace with app.MapControllers()
     (r'app\.UseEndpoints\s*\(\s*endpoints\s*=>\s*\{[^}]*endpoints\.MapControllerRoute\s*\([^)]+\)\s*;[^}]*\}\s*\)', 'app.MapControllers()'),
+    # Duplicate type keywords in lambda/method parameters — LLM hallucination fix
+    # e.g. (double double posLong) → (double posLong)
+    (r'\b(int|string|double|float|bool|decimal|long|short|byte|char|object)\s+\1\s+(\w+)', r'\1 \2'),
+    # Microsoft Graph SDK v4 → v5: .Request().GetAsync() → .GetAsync()
+    (r'\.Request\(\)\.GetAsync\(\)', '.GetAsync()'),
+    # Microsoft Graph SDK v4 → v5: .Request().Select(...).GetAsync() → .GetAsync()
+    (r'\.Request\(\)\.Select\(([^)]+)\)\.GetAsync\(\)', '.GetAsync()'),
+    # Microsoft Graph SDK v4 → v5: .Request().Filter(...).GetAsync() → .GetAsync()
+    (r'\.Request\(\)\.Filter\(([^)]+)\)\.GetAsync\(\)', '.GetAsync()'),
 ]
 
 # Invalid using statements to remove from any .cs file
@@ -68,17 +119,25 @@ INVALID_USINGS = [
 ]
 
 
-def fix_csproj(file_path: Path) -> str:
+def fix_csproj(file_path: Path, to_version: str = ".NET 8") -> str:
     """
     Fix .csproj using text/regex — preserves Sdk attribute exactly.
     Does NOT use XML parser to avoid stripping Sdk="..." from <Project> tag.
+    Supports .NET 8, 9 and 10 via to_version parameter.
     """
     content = file_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Fix TargetFramework — replace any existing value with net8.0
+    # Derive target framework moniker from to_version — e.g. '.NET 9' → 'net9.0'
+    ver_match = re.search(r'(\d+)', to_version or '')
+    major = ver_match.group(1) if ver_match else "8"
+    if major not in ("8", "9", "10"):
+        major = "8"
+    target_framework = f"net{major}.0"
+
+    # Fix TargetFramework — replace any existing value with correct target
     content = re.sub(
         r'<TargetFramework>[^<]+</TargetFramework>',
-        '<TargetFramework>net8.0</TargetFramework>',
+        f'<TargetFramework>{target_framework}</TargetFramework>',
         content
     )
 
@@ -109,8 +168,11 @@ def fix_csproj(file_path: Path) -> str:
             '', content, flags=re.DOTALL
         )
 
-    # Fix package versions
-    for pkg, version in PACKAGE_VERSIONS.items():
+    # Fix package versions based on target .NET version
+    package_versions = _get_package_versions(to_version)
+    for pkg, version in package_versions.items():
+        if not version:
+            continue
         content = re.sub(
             rf'(<PackageReference Include="{re.escape(pkg)}"[^>]*Version=")[^"]*(")',
             rf'\g<1>{version}\2',
@@ -121,6 +183,12 @@ def fix_csproj(file_path: Path) -> str:
     content = re.sub(
         r'<Target[^>]*(Webpack|Spa|Npm)[^>]*>.*?</Target>\s*\n?',
         '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+
+    # Remove packages.config style HintPath references — not valid in SDK-style projects
+    content = re.sub(
+        r'\s*<Reference Include="[^"]+">\s*<HintPath>packages\\[^<]+</HintPath>\s*</Reference>\s*\n?',
+        '', content, flags=re.DOTALL
     )
 
     # Remove empty ItemGroup blocks
@@ -338,11 +406,11 @@ def fix_application_context(content: str, model_names: list) -> str:
     return content
 
 
-def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=None) -> dict:
+def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=None, to_version: str = ".NET 8") -> dict:
     """
     Main Fix Agent entry point.
     Runs all fixes on the migrated output directory.
-    Generic — works for ANY .NET project.
+    Generic — works for ANY .NET project targeting .NET 8, 9 or 10.
     """
     out_path = Path(output_dir)
     upload_path = Path(upload_dir)
@@ -361,7 +429,7 @@ def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=No
     for csproj_file in out_path.rglob("*.csproj"):
         if progress_callback:
             progress_callback(f"Fix Agent: Cleaning {csproj_file.name}...")
-        fixed = fix_csproj(csproj_file)
+        fixed = fix_csproj(csproj_file, to_version)
         csproj_file.write_text(fixed, encoding="utf-8")
         fixes_applied.append(f"Fixed {csproj_file.name} — updated packages and target framework")
         # Proactively resolve version conflicts before restore
@@ -471,6 +539,13 @@ public class {ctx_name} : DbContext
                 'using System.Linq;',
                 'using System.Threading.Tasks;',
                 'using System.Text;',
+                'using System.IO;',
+                'using System.Runtime.InteropServices;',
+                'using System.Threading;',
+                'using System.Net.Http;',
+                'using System.Net;',
+                'using System.Text.RegularExpressions;',
+                'using System.Reflection;',
             }
             fixed_lines = []
             for line in fixed.splitlines():
