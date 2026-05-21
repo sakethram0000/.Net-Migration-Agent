@@ -192,7 +192,7 @@ def analyze(upload_dir: str, from_version: str, to_version: str) -> dict:
             code_summary += f"\n--- {name} ---\n{content[:800]}\n"
         prompt = (f"Analyze this .NET code for migration from {from_version} to {to_version}:\n"
                   f"{code_summary}\nProvide top 3 breaking changes needed in 2 sentences each.")
-        analysis_text = ask_with_system(SYSTEM_PROMPT, prompt)
+        analysis_text = ask_with_system(SYSTEM_PROMPT, prompt, agent_name="Analyzer Agent")
     except Exception:
         pass
 

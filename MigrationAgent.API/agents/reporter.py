@@ -390,8 +390,16 @@ def _run_validation(migrated_dir: Path) -> dict:
 def _build_fixer(validation: dict) -> dict:
     errors_text = validation.get("errors", "") or validation.get("output", "") or ""
     error_codes = re.findall(r"error\s+([A-Z]+\d+):\s*(.*)", errors_text)
+    # Deduplicate — same error code + same message counts as one
+    seen = set()
+    unique_errors = []
+    for code, message in error_codes:
+        key = f"{code}:{message[:80]}"
+        if key not in seen:
+            seen.add(key)
+            unique_errors.append((code, message))
     items = []
-    for code, message in error_codes[:8]:
+    for code, message in unique_errors[:8]:
         items.append({
             "error": code,
             "root_cause": message[:200],
@@ -416,6 +424,18 @@ def _fix_hint(code: str, message: str) -> str:
         return "Update using statements and NuGet references."
     if "nullable" in msg:
         return "Initialize nullable properties or mark them nullable."
+    if "runtimeinformation" in msg:
+        return "Add 'using System.Runtime.InteropServices;' to the file using RuntimeInformation."
+    if "does not exist in the current context" in msg:
+        return "Add the required using statement or NuGet package for the missing type."
+    if "cannot convert" in msg or "no implicit conversion" in msg:
+        return "Fix type mismatch — check method signatures and return types."
+    if "does not contain a definition" in msg:
+        return "Method or property not found — check the correct API for .NET 8."
+    if "ambiguous" in msg:
+        return "Resolve ambiguous reference by adding fully qualified namespace."
+    if "duplicate" in msg:
+        return "Remove duplicate using statements or class definitions."
     return "Apply targeted source/package correction and rerun build."
 
 

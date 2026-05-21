@@ -223,7 +223,7 @@ function App() {
           <article className="ma-card">
             <div className="ma-card-header"><div className="ma-card-title">Migration Controls</div></div>
             <div className="ma-card-body">
-              <div className="scope-grid">{scopes.map((s) => <div className="scope-card on" key={s.key}><div className="si">{String(s.value()).slice(0, 4)}</div><div className="sl">{s.label}</div></div>)}</div>
+              <div className="scope-grid">{scopes.map((s) => <div className={`scope-card ${inventory ? 'on' : ''}`} key={s.key}><div className="si">{String(s.value()).slice(0, 4)}</div><div className="sl">{s.label}</div></div>)}</div>
               <button className="run-btn" disabled={!files.length || busy === 'migration'} onClick={startMigration}>{busy === 'migration' ? 'Migration running...' : 'Run Migration'}</button>
               <button className="secondary-run" disabled={!files.length} onClick={runAnalyze}>Refresh Analysis</button>
               {runtime && <div className="runtime-box">{runtime.agent_framework.detail}<br />LLM: {runtime.llm.provider} / {runtime.llm.model}</div>}
@@ -837,13 +837,26 @@ function TokenUtilization({ stats }) {
     { label: 'Avg Tokens / LLM Call',  value: stats?.avg_tokens_per_llm_call, icon: '📈', accent: 'var(--red)' },
   ];
   const maxVal = Math.max(1, ...cards.map((c) => Number(c.value) || 0));
+
+  // Per-agent breakdown
+  const byAgent = stats?.by_agent || {};
+  const agentEntries = Object.entries(byAgent).sort((a, b) => b[1] - a[1]);
+  const totalTokens = stats?.total_tokens || 1;
+
+  // Context window
+  const contextWindow = stats?.context_window || 128000;
+  const contextPct = stats?.context_window_pct || 0;
+  const contextColor = contextPct < 30 ? 'var(--apple)' : contextPct < 70 ? 'var(--sunset)' : 'var(--red)';
+  const contextStatus = contextPct < 30 ? 'Well within limits' : contextPct < 70 ? 'Moderate usage' : 'High usage — monitor closely';
+
   return (
     <section className="ma-card">
       <div className="ma-card-header">
         <div className="ma-card-title">Token Utilization</div>
-        <span className="section-status">{stats ? 'Live Data' : 'Available after migration'}</span>
+        <span className="section-status">{stats ? `${stats.model || 'Groq LLM'} — Live Data` : 'Available after migration'}</span>
       </div>
       <div className="ma-card-body">
+        {/* Summary cards */}
         <div className="token-grid">
           {cards.map((c) => (
             <div className={`token-card ${!stats ? 'token-skeleton' : ''}`} key={c.label} style={{ '--accent': c.accent }}>
@@ -856,6 +869,65 @@ function TokenUtilization({ stats }) {
             </div>
           ))}
         </div>
+
+        {/* Per-agent breakdown */}
+        {stats && agentEntries.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Per-Agent Token Breakdown</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--brand-strong)' }}>Total: {totalTokens.toLocaleString()} tokens</div>
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {agentEntries.map(([agent, tokens]) => {
+                const pct = Math.round((tokens / totalTokens) * 100);
+                const barColor = pct > 60 ? 'var(--brand)' : pct > 30 ? 'var(--apple-strong)' : 'var(--apple)';
+                return (
+                  <div key={agent} style={{ display: 'grid', gridTemplateColumns: '180px 1fr 80px 52px', alignItems: 'center', gap: 12 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent}</div>
+                    <div style={{ height: 8, background: 'var(--line)', borderRadius: 999, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 999, transition: 'width 0.6s ease' }}></div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'right' }}>{tokens.toLocaleString()} tkns</div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: barColor, textAlign: 'right' }}>{pct}%</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Context window health */}
+        {stats && (
+          <div style={{ marginTop: 24, padding: '16px 18px', background: 'var(--alabaster)', border: '1px solid var(--line)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 24 }}>
+            {/* Circle */}
+            <div style={{ position: 'relative', width: 72, height: 72, flexShrink: 0 }}>
+              <svg width="72" height="72" style={{ transform: 'rotate(-90deg)' }}>
+                <circle cx="36" cy="36" r="28" fill="none" stroke="var(--line)" strokeWidth="7" />
+                <circle cx="36" cy="36" r="28" fill="none" stroke={contextColor} strokeWidth="7"
+                  strokeDasharray={`${2 * Math.PI * 28}`}
+                  strokeDashoffset={`${2 * Math.PI * 28 * (1 - contextPct / 100)}`}
+                  style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+                />
+              </svg>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
+                <span style={{ fontSize: 13, fontWeight: 900, color: contextColor }}>{contextPct}%</span>
+              </div>
+            </div>
+            {/* Info */}
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)', marginBottom: 4 }}>Context Window Usage per Call</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 4 }}>
+                Model: <strong style={{ color: 'var(--ink)' }}>{stats.model || 'llama-3.3-70b-versatile'}</strong> &nbsp;·&nbsp; Per-call limit: <strong style={{ color: 'var(--ink)' }}>{(contextWindow).toLocaleString()} tokens</strong>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 4 }}>
+                Avg per call: <strong style={{ color: 'var(--ink)' }}>{Number(stats.avg_tokens_per_llm_call).toLocaleString()} tokens</strong>
+                &nbsp;·&nbsp;
+                <span style={{ fontWeight: 800, color: contextColor }}>✓ {contextStatus}</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--soft)', fontStyle: 'italic' }}>This is the per-call token limit, not a daily quota.</div>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

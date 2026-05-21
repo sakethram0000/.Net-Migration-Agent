@@ -301,7 +301,7 @@ File: {path}
 
 Return ONLY the migrated .razor content."""
 
-        result = ask_with_system(system, prompt)
+        result = ask_with_system(system, prompt, agent_name="Blazor Agent")
         result = re.sub(r'^```(?:razor|html|cshtml)?\s*', '', result, flags=re.MULTILINE)
         result = re.sub(r'\s*```$', '', result, flags=re.MULTILINE)
         return result.strip()

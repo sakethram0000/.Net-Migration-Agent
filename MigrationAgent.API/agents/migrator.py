@@ -178,7 +178,7 @@ File: {relative_path}
 {code[:8000]}
 ```"""
     try:
-        reviewed = ask_with_system(SYSTEM_REVIEWER, prompt)
+        reviewed = ask_with_system(SYSTEM_REVIEWER, prompt, agent_name="Reviewer")
         return extract_code(reviewed, "csharp")
     except Exception:
         return code  # if reviewer fails, keep original migrated code
@@ -240,7 +240,7 @@ Rules:
 - NO Startup class, NO CreateHostBuilder, NO IHostBuilder
 - Return ONLY the complete Program.cs inside a ```csharp block."""
 
-        response = ask_with_system(SYSTEM_PROGRAM, prompt)
+        response = ask_with_system(SYSTEM_PROGRAM, prompt, agent_name="LLM Migrator")
         merged_code = extract_code(response, "csharp")
         if progress_callback:
             progress_callback("Reviewing merged Program.cs...")
@@ -274,7 +274,7 @@ Rules:
 - End with app.Run()
 - Return ONLY the complete Program.cs inside a ```csharp block."""
 
-        response = ask_with_system(SYSTEM_PROGRAM, prompt)
+        response = ask_with_system(SYSTEM_PROGRAM, prompt, agent_name="LLM Migrator")
         program_code = extract_code(response, "csharp")
         if progress_callback:
             progress_callback("Reviewing Program.cs...")
@@ -330,7 +330,7 @@ File: {relative_path}
 ```
 
 Return ONLY the complete migrated C# code in a ```csharp block."""
-            response = ask_with_system(SYSTEM_CS, prompt)
+            response = ask_with_system(SYSTEM_CS, prompt, agent_name="LLM Migrator")
             code = extract_code(response, "csharp")
             # Reviewer pass — catches what LLM missed
             if progress_callback:
@@ -347,7 +347,7 @@ File: {relative_path}
 ```
 
 Return ONLY the migrated XML in a ```xml block."""
-            response = ask_with_system(SYSTEM_CSPROJ, prompt)
+            response = ask_with_system(SYSTEM_CSPROJ, prompt, agent_name="LLM Migrator")
             code = extract_code(response, "xml")
 
         elif file_type == '.sln':

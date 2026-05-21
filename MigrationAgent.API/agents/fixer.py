@@ -540,7 +540,6 @@ public class {ctx_name} : DbContext
                 'using System.Threading.Tasks;',
                 'using System.Text;',
                 'using System.IO;',
-                'using System.Runtime.InteropServices;',
                 'using System.Threading;',
                 'using System.Net.Http;',
                 'using System.Net;',

@@ -6,12 +6,20 @@ import re
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # ── Token tracking ────────────────────────────────────────────────────────
-_stats = {"total_tokens": 0, "total_llm_calls": 0, "total_executions": 0}
+_stats = {
+    "total_tokens": 0,
+    "total_llm_calls": 0,
+    "total_executions": 0,
+    "by_agent": {},
+}
+
+CONTEXT_WINDOW = 128000  # llama-3.3-70b-versatile context window
 
 def reset_token_stats():
     _stats["total_tokens"] = 0
     _stats["total_llm_calls"] = 0
     _stats["total_executions"] = 0
+    _stats["by_agent"] = {}
 
 def increment_execution():
     _stats["total_executions"] += 1
@@ -19,12 +27,18 @@ def increment_execution():
 def get_token_stats() -> dict:
     calls = _stats["total_llm_calls"]
     execs = _stats["total_executions"]
+    total = _stats["total_tokens"]
+    avg_per_call = round(total / calls, 1) if calls else 0
     return {
-        "total_tokens":            _stats["total_tokens"],
-        "total_executions":        execs,
-        "total_llm_calls":         calls,
-        "avg_tokens_per_execution": round(_stats["total_tokens"] / execs, 1) if execs else 0,
-        "avg_tokens_per_llm_call": round(_stats["total_tokens"] / calls, 1) if calls else 0,
+        "total_tokens":             total,
+        "total_executions":         execs,
+        "total_llm_calls":          calls,
+        "avg_tokens_per_execution": round(total / execs, 1) if execs else 0,
+        "avg_tokens_per_llm_call":  avg_per_call,
+        "context_window":           CONTEXT_WINDOW,
+        "context_window_pct":       round((avg_per_call / CONTEXT_WINDOW) * 100, 1) if avg_per_call else 0,
+        "model":                    MODEL,
+        "by_agent":                 dict(_stats["by_agent"]),
     }
 
 def _load_api_keys() -> list[str]:
@@ -41,7 +55,7 @@ def _load_api_keys() -> list[str]:
     return keys
 
 
-def _chat(messages: list) -> str:
+def _chat(messages: list, agent_name: str = "Unknown") -> str:
     api_keys = _load_api_keys()
     if not api_keys:
         raise Exception(
@@ -61,7 +75,10 @@ def _chat(messages: list) -> str:
                 )
                 usage = getattr(response, "usage", None)
                 if usage:
-                    _stats["total_tokens"] += getattr(usage, "total_tokens", 0)
+                    tokens = getattr(usage, "total_tokens", 0)
+                    _stats["total_tokens"] += tokens
+                    # Track per-agent
+                    _stats["by_agent"][agent_name] = _stats["by_agent"].get(agent_name, 0) + tokens
                 _stats["total_llm_calls"] += 1
                 return response.choices[0].message.content
             except Exception as e:
@@ -77,15 +94,15 @@ def _chat(messages: list) -> str:
     raise Exception(f"All Groq API keys failed after retries. Last error: {last_error}")
 
 
-def ask(prompt: str) -> str:
-    return _chat([{"role": "user", "content": prompt}])
+def ask(prompt: str, agent_name: str = "Unknown") -> str:
+    return _chat([{"role": "user", "content": prompt}], agent_name)
 
 
-def ask_with_system(system: str, prompt: str) -> str:
+def ask_with_system(system: str, prompt: str, agent_name: str = "Unknown") -> str:
     return _chat([
         {"role": "system", "content": system},
         {"role": "user", "content": prompt}
-    ])
+    ], agent_name)
 
 
 def check_connection() -> bool:

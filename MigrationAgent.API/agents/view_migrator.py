@@ -216,7 +216,7 @@ File: {path}
 
 Return ONLY the migrated .cshtml content."""
 
-        result = ask_with_system(system, prompt)
+        result = ask_with_system(system, prompt, agent_name="View Migration Agent")
         # Strip any markdown code fences if LLM wraps in them
         result = re.sub(r'^```(?:cshtml|html|razor)?\s*', '', result, flags=re.MULTILINE)
         result = re.sub(r'\s*```$', '', result, flags=re.MULTILINE)
