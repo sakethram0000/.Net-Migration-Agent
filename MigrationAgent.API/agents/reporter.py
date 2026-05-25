@@ -6,25 +6,32 @@ BASE_DIR = Path(__file__).parent.parent
 DEFAULT_OUTPUT_DIR = BASE_DIR / "outputs" / "migrated"
 UPLOAD_DIR = BASE_DIR / "uploads"
 
+# In-memory store — orchestrator writes context here after migration
+# reporter reads from it instead of re-running everything
+_last_context = None
+
+
+def store_context(context):
+    """Called by orchestrator after pipeline completes — stores context for reporter."""
+    global _last_context
+    _last_context = context
+
 
 def generate_report():
+    """
+    Reporter Agent — reads from stored context when available.
+    Falls back to file scanning only if no context exists (direct API call).
+    """
     migrated_dir = DEFAULT_OUTPUT_DIR
-    upload_dir = UPLOAD_DIR
+    upload_dir   = UPLOAD_DIR
+    ctx          = _last_context  # set by orchestrator after pipeline completes
 
     empty = {
-        "summary": "",
-        "from_version": "",
-        "to_version": "",
-        "changes": [],
-        "issues": [],
-        "recommendations": [],
-        "dependency_map": {},
-        "manual_fixes": [],
+        "summary": "", "from_version": "", "to_version": "",
+        "changes": [], "issues": [], "recommendations": [],
+        "dependency_map": {}, "manual_fixes": [],
         "readiness": {"score": 0, "level": "Unknown", "summary": "", "categories": [], "recommendations": []},
-        "auth_migration": {},
-        "view_migration": {},
-        "webforms_migration": {},
-        "blazor_migration": {},
+        "auth_migration": {}, "view_migration": {}, "webforms_migration": {}, "blazor_migration": {},
         "validation": {"success": False, "stage": "not run", "output": "", "errors": ""},
         "diff": {"summary": {"added": 0, "modified": 0, "removed": 0, "unchanged": 0}, "added": [], "modified": [], "removed": [], "previews": []},
         "code_rewrite_previews": [],
@@ -32,7 +39,7 @@ def generate_report():
         "dependency_modernization": {"summary": "", "items": []},
         "architecture_suggestions": {"summary": "", "items": []},
         "generated_tests": {"summary": "", "items": []},
-        "executive_report": {},
+        "executive_report": {}, "guardrails": {}, "orchestrator": {},
     }
 
     if not migrated_dir.exists():
@@ -40,24 +47,74 @@ def generate_report():
         empty["recommendations"].append("Run migration first.")
         return empty
 
+    # ── Pull data from context if available (agent mode) ─────────────────
+    if ctx is not None:
+        auth_migration     = ctx.auth_result
+        view_migration     = ctx.view_result
+        webforms_migration = ctx.webforms_result
+        blazor_migration   = ctx.blazor_result
+        guardrail_result   = ctx.guardrail_result
+        manual_fixes       = ctx.fix_result.get("manual_fixes", [])
+        orchestrator_data  = ctx.to_summary_dict()
+        build_passed       = ctx.build_passed
+        build_result       = ctx.build_result
+        from_version       = ctx.from_version
+        to_version         = ctx.to_version
+        validation = {
+            "success":    build_passed,
+            "stage":      "build",
+            "output":     build_result.get("output", ""),
+            "errors":     build_result.get("output", "") if not build_passed else "",
+            "skipped":    build_result.get("skipped", False),
+            "reason":     build_result.get("reason", ""),
+            "auto_fixes": build_result.get("auto_fixes", []) + build_result.get("pre_clean_fixes", []),
+            "error_list": build_result.get("errors", []),
+        }
+    else:
+        # ── Fallback: no context — re-run agents independently ────────────
+        from_version = ""
+        to_version   = ""
+        orchestrator_data = {}
+        guardrail_result  = {}
+        manual_fixes = _scan_manual_fixes(migrated_dir)
+
+        from agents.build_validator import build_loop
+        validation_raw = build_loop(str(migrated_dir))
+        build_passed   = validation_raw.get("success", False)
+        validation = {
+            "success":    build_passed,
+            "stage":      "build",
+            "output":     validation_raw.get("output", ""),
+            "errors":     validation_raw.get("output", "") if not build_passed else "",
+            "skipped":    validation_raw.get("skipped", False),
+            "reason":     validation_raw.get("reason", ""),
+            "auto_fixes": validation_raw.get("auto_fixes", []) + validation_raw.get("pre_clean_fixes", []),
+            "error_list": validation_raw.get("errors", []),
+        }
+        try:
+            auth_migration = run_auth_agent(upload_dir=str(upload_dir), output_dir=str(migrated_dir))
+        except Exception:
+            auth_migration = {"status": "skipped", "summary": "Auth agent unavailable."}
+        view_migration     = {"skipped": True, "reason": "No context — run migration first."}
+        webforms_migration = {"skipped": True, "reason": "No context — run migration first."}
+        blazor_migration   = {"skipped": True, "reason": "No context — run migration first."}
+
+    # ── Always re-scan files for changes + dependency map ─────────────────
     migrated_files = (
         list(migrated_dir.rglob("*.cs"))
         + list(migrated_dir.rglob("*.csproj"))
         + list(migrated_dir.rglob("*.sln"))
     )
-
-    # --- changes ---
     changes = []
     for f in migrated_files:
         rel = str(f.relative_to(migrated_dir))
         if f.suffix == ".cs":
-            changes.append({"file": rel, "summary": "Migrated to .NET 8 / C# 12"})
+            changes.append({"file": rel, "summary": f"Migrated to {to_version or '.NET 8'} / C# 12"})
         elif f.suffix == ".csproj":
-            changes.append({"file": rel, "summary": "Updated to .NET 8 SDK-style project"})
+            changes.append({"file": rel, "summary": "Updated to SDK-style project"})
         elif f.suffix == ".sln":
             changes.append({"file": rel, "summary": "Solution file preserved"})
 
-    # --- dependency_map ---
     dependency_map = {}
     for csproj in migrated_dir.rglob("*.csproj"):
         try:
@@ -67,9 +124,93 @@ def generate_report():
         except Exception:
             pass
 
-    # --- manual_fixes ---
+    # ── Always re-scan manual fixes from output files ─────────────────────
+    if not manual_fixes:
+        manual_fixes = _scan_manual_fixes(migrated_dir)
+
+    # ── Diff + rewrite previews ───────────────────────────────────────────
+    diff                 = _build_diff(upload_dir, migrated_dir)
+    code_rewrite_previews = _build_rewrite_previews(upload_dir, migrated_dir)
+
+    # ── Derived sections ──────────────────────────────────────────────────
+    build_fixer              = _build_fixer(validation)
+    dependency_modernization = _dependency_modernization(dependency_map)
+    architecture_suggestions = _architecture_suggestions(manual_fixes)
+    generated_tests          = _generated_tests(migrated_dir)
+
+    # ── Readiness scorecard ───────────────────────────────────────────────
+    high_fixes   = len([f for f in manual_fixes if any(k in f for k in ['System.Web', 'Global.asax', 'packages.config', 'HttpContext.Current'])])
+    medium_fixes = len(manual_fixes) - high_fixes
+
+    def _score(val): return max(0, min(100, val))
+
+    readiness_categories = [
+        {'name': 'Build Status',       'score': _score(95 if build_passed else 40),       'status': 'Good' if build_passed else 'Risk',   'description': 'dotnet build passed' if build_passed else 'Build failed or skipped — review errors'},
+        {'name': 'Legacy Code Removed','score': _score(100 - high_fixes * 15),            'status': 'Good' if high_fixes == 0 else 'Risk', 'description': f'{high_fixes} high-priority legacy pattern(s) still present' if high_fixes else 'No critical legacy patterns remaining'},
+        {'name': 'Code Quality',       'score': _score(100 - medium_fixes * 10),          'status': 'Good' if medium_fixes == 0 else 'Review', 'description': f'{medium_fixes} code quality item(s) to review' if medium_fixes else 'No code quality issues detected'},
+        {'name': 'Dependencies',       'score': _score(90 if dependency_map else 60),     'status': 'Good' if dependency_map else 'Review', 'description': f'{len(dependency_map)} package(s) migrated' if dependency_map else 'No packages detected'},
+        {'name': 'Files Migrated',     'score': _score(100 if len(changes) > 0 else 0),  'status': 'Good' if len(changes) > 0 else 'Risk', 'description': f'{len(changes)} file(s) successfully migrated'},
+    ]
+    readiness_score = round(sum(c['score'] for c in readiness_categories) / len(readiness_categories))
+    readiness_level = 'Ready' if readiness_score >= 80 else 'Moderate' if readiness_score >= 60 else 'High Risk'
+    readiness_recs  = []
+    if not build_passed:
+        readiness_recs.append('Fix build errors before deploying — check Build Error AI Fixer for details.')
+    if high_fixes > 0:
+        readiness_recs.append(f'Address {high_fixes} high-priority item(s) in Manual Fix List before deploying.')
+    if medium_fixes > 0:
+        readiness_recs.append(f'Review {medium_fixes} code quality item(s) in Manual Fix List.')
+    if not readiness_recs:
+        readiness_recs.append('Migration looks clean — proceed with smoke testing and regression tests.')
+
+    readiness = {
+        'score': readiness_score, 'level': readiness_level,
+        'summary': f'{readiness_level} — {readiness_score}/100 migration readiness score.',
+        'categories': readiness_categories, 'recommendations': readiness_recs,
+    }
+
+    executive_report = {
+        "title":               ".NET Migration Executive Report",
+        "total_files_migrated": len(migrated_files),
+        "build_status":        "Passed" if build_passed else "Needs Review",
+        "readiness_score":     readiness_score,
+        "readiness_level":     readiness_level,
+        "dependency_count":    len(dependency_map),
+        "manual_fix_count":    len(manual_fixes),
+        "diff_summary":        diff["summary"],
+        "recommendations":     readiness_recs,
+    }
+
+    return {
+        "summary":                f"{len(migrated_files)} file(s) migrated successfully.",
+        "from_version":           from_version,
+        "to_version":             to_version,
+        "changes":                changes,
+        "issues":                 [],
+        "recommendations":        ["Review code for business logic correctness.", "Run dotnet build to verify compilation.", "Test all API endpoints and database connections."],
+        "dependency_map":         dependency_map,
+        "manual_fixes":           manual_fixes,
+        "readiness":              readiness,
+        "view_migration":         view_migration,
+        "webforms_migration":     webforms_migration,
+        "blazor_migration":       blazor_migration,
+        "auth_migration":         auth_migration,
+        "validation":             validation,
+        "diff":                   diff,
+        "code_rewrite_previews":  code_rewrite_previews,
+        "build_fixer":            build_fixer,
+        "dependency_modernization": dependency_modernization,
+        "architecture_suggestions": architecture_suggestions,
+        "generated_tests":        generated_tests,
+        "executive_report":       executive_report,
+        "guardrails":             guardrail_result,
+        "orchestrator":           orchestrator_data,
+    }
+
+
+def _scan_manual_fixes(migrated_dir: Path) -> list:
+    """Scan migrated output files for remaining issues."""
     manual_fixes = []
-    # Scan migrated output for remaining code issues
     for cs_file in migrated_dir.rglob("*.cs"):
         if any(p.lower() in {"obj", "bin"} for p in cs_file.parts):
             continue
@@ -88,202 +229,43 @@ def generate_report():
                 manual_fixes.append(f"{rel}: Contains ConfigurationManager — replace with IConfiguration")
         except Exception:
             pass
-    # Scan for structural leftovers that should have been removed
     structural_leftovers = [
-        ("packages.config",  "packages.config still present — migrate to PackageReference in .csproj"),
-        ("Web.config",       "Web.config still present — review IIS/system.web settings, not needed in ASP.NET Core"),
-        ("Global.asax",      "Global.asax still present — startup hooks should be in Program.cs"),
-        ("Global.asax.cs",   "Global.asax.cs still present — merge application startup logic into Program.cs"),
-        ("App_Start",        "App_Start folder still present — BundleConfig/RouteConfig/FilterConfig not needed in ASP.NET Core"),
-        ("AssemblyInfo.cs",  "AssemblyInfo.cs still present — not needed in SDK-style projects"),
+        ("packages.config", "packages.config still present — migrate to PackageReference"),
+        ("Web.config",      "Web.config still present — not needed in ASP.NET Core"),
+        ("Global.asax",     "Global.asax still present — startup hooks should be in Program.cs"),
+        ("Global.asax.cs",  "Global.asax.cs still present — merge into Program.cs"),
+        ("App_Start",       "App_Start folder still present — not needed in ASP.NET Core"),
+        ("AssemblyInfo.cs", "AssemblyInfo.cs still present — not needed in SDK-style projects"),
     ]
     for filename, message in structural_leftovers:
-        matches = list(migrated_dir.rglob(filename))
-        for match in matches:
+        for match in migrated_dir.rglob(filename):
             if any(p.lower() in {"obj", "bin"} for p in match.parts):
                 continue
-            rel = str(match.relative_to(migrated_dir))
-            manual_fixes.append(f"{rel}: {message}")
+            manual_fixes.append(f"{str(match.relative_to(migrated_dir))}: {message}")
+    return manual_fixes
 
-    # --- diff (compare upload vs migrated) ---
-    diff = _build_diff(upload_dir, migrated_dir)
 
-    # --- code_rewrite_previews ---
-    code_rewrite_previews = _build_rewrite_previews(upload_dir, migrated_dir)
+# ── Agent wrapper ──────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
 
-    # --- validation (use build_validator result if available, else run fresh) ---
-    from agents.build_validator import build_loop
-    validation_raw = build_loop(str(migrated_dir))
-    validation = {
-        "success":  validation_raw.get("success", False),
-        "stage":    "build",
-        "output":   validation_raw.get("output", ""),
-        "errors":   validation_raw.get("output", "") if not validation_raw.get("success") else "",
-        "skipped":  validation_raw.get("skipped", False),
-        "reason":   validation_raw.get("reason", ""),
-        "auto_fixes": validation_raw.get("auto_fixes", []) + validation_raw.get("pre_clean_fixes", []),
-        "error_list": validation_raw.get("errors", []),
-    }
+class ReporterAgent(BaseAgent):
+    name = "Reporter Agent"
+    goal = "generate full migration report from context — no re-running of agents"
 
-    # --- build_fixer ---
-    build_fixer = _build_fixer(validation)
+    def act(self, context: MigrationContext) -> dict:
+        store_context(context)
+        report = generate_report()
+        return {"success": True, "report": report}
 
-    # --- dependency_modernization ---
-    dependency_modernization = _dependency_modernization(dependency_map)
-
-    # --- architecture_suggestions ---
-    architecture_suggestions = _architecture_suggestions(manual_fixes)
-
-    # --- generated_tests ---
-    generated_tests = _generated_tests(migrated_dir)
-
-    # --- view_migration ---
-    view_migration = {}
-    try:
-        from agents.view_migrator import run_view_migrator
-        view_migration = run_view_migrator(
-            output_dir=str(migrated_dir),
-            from_version="",
-            to_version="",
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        return AgentObservation(
+            agent=self.name,
+            status="completed",
+            summary="Migration report generated from agent context.",
+            actionable=False,
+            data=result,
         )
-    except Exception:
-        view_migration = {"skipped": True, "reason": "View migration report unavailable."}
-
-    # --- blazor_migration ---
-    blazor_migration = {}
-    try:
-        from agents.blazor_migrator import run_blazor_migrator
-        blazor_migration = run_blazor_migrator(
-            output_dir=str(migrated_dir),
-            from_version="",
-            to_version="",
-        )
-    except Exception:
-        blazor_migration = {"skipped": True, "reason": "Blazor migration report unavailable."}
-
-    # --- webforms_migration ---
-    webforms_migration = {}
-    try:
-        from agents.webforms_migrator import run_webforms_migrator
-        webforms_migration = run_webforms_migrator(
-            output_dir=str(migrated_dir),
-            from_version="",
-            to_version="",
-        )
-    except Exception:
-        webforms_migration = {"skipped": True, "reason": "Web Forms migration report unavailable."}
-
-    # --- auth_migration ---
-    auth_migration = {}
-    try:
-        auth_migration = run_auth_agent(
-            upload_dir=str(upload_dir),
-            output_dir=str(migrated_dir),
-        )
-    except Exception:
-        auth_migration = {"status": "skipped", "summary": "Auth agent could not run during report generation."}
-
-    # --- readiness scorecard ---
-    patterns_found = len([c for c in changes if 'System.Web' in c.get('summary','')])
-    high_fixes = len([f for f in manual_fixes if any(k in f for k in ['System.Web','Global.asax','packages.config','HttpContext.Current'])])
-    medium_fixes = len(manual_fixes) - high_fixes
-    build_passed = validation.get('success', False)
-
-    def _score(val): return max(0, min(100, val))
-
-    readiness_categories = [
-        {
-            'name': 'Build Status',
-            'score': _score(95 if build_passed else 40),
-            'status': 'Good' if build_passed else 'Risk',
-            'description': 'dotnet build passed' if build_passed else 'Build failed or skipped — review errors'
-        },
-        {
-            'name': 'Legacy Code Removed',
-            'score': _score(100 - high_fixes * 15),
-            'status': 'Good' if high_fixes == 0 else 'Risk',
-            'description': f'{high_fixes} high-priority legacy pattern(s) still present' if high_fixes else 'No critical legacy patterns remaining'
-        },
-        {
-            'name': 'Code Quality',
-            'score': _score(100 - medium_fixes * 10),
-            'status': 'Good' if medium_fixes == 0 else 'Review',
-            'description': f'{medium_fixes} code quality item(s) to review' if medium_fixes else 'No code quality issues detected'
-        },
-        {
-            'name': 'Dependencies',
-            'score': _score(90 if dependency_map else 60),
-            'status': 'Good' if dependency_map else 'Review',
-            'description': f'{len(dependency_map)} package(s) migrated to .NET 8' if dependency_map else 'No packages detected in migrated .csproj'
-        },
-        {
-            'name': 'Files Migrated',
-            'score': _score(100 if len(changes) > 0 else 0),
-            'status': 'Good' if len(changes) > 0 else 'Risk',
-            'description': f'{len(changes)} file(s) successfully migrated'
-        },
-    ]
-    readiness_score = round(sum(c['score'] for c in readiness_categories) / len(readiness_categories))
-    readiness_level = 'Ready' if readiness_score >= 80 else 'Moderate' if readiness_score >= 60 else 'High Risk'
-    readiness_recs = []
-    if not build_passed:
-        readiness_recs.append('Fix build errors before deploying — check Build Error AI Fixer for details.')
-    if high_fixes > 0:
-        readiness_recs.append(f'Address {high_fixes} high-priority item(s) in Manual Fix List before deploying.')
-    if medium_fixes > 0:
-        readiness_recs.append(f'Review {medium_fixes} code quality item(s) in Manual Fix List.')
-    if not readiness_recs:
-        readiness_recs.append('Migration looks clean — proceed with smoke testing and regression tests.')
-
-    readiness = {
-        'score': readiness_score,
-        'level': readiness_level,
-        'summary': f'{readiness_level} — {readiness_score}/100 migration readiness score.',
-        'categories': readiness_categories,
-        'recommendations': readiness_recs,
-    }
-
-    summary = f"{len(migrated_files)} file(s) migrated successfully to .NET 8."
-    recommendations = [
-        "Migration completed. Review code for business logic correctness.",
-        "Run dotnet build to verify compilation.",
-        "Test all API endpoints and database connections.",
-    ]
-
-    executive_report = {
-        "title": ".NET Migration Executive Report",
-        "total_files_migrated": len(migrated_files),
-        "build_status": "Passed" if validation.get("success") else "Needs Review",
-        "readiness_score": readiness_score,
-        "readiness_level": readiness_level,
-        "dependency_count": len(dependency_map),
-        "manual_fix_count": len(manual_fixes),
-        "diff_summary": diff["summary"],
-        "recommendations": readiness_recs,
-    }
-
-    return {
-        "summary": summary,
-        "changes": changes,
-        "issues": [],
-        "recommendations": recommendations,
-        "dependency_map": dependency_map,
-        "manual_fixes": manual_fixes,
-        "readiness": readiness,
-        "view_migration": view_migration,
-        "webforms_migration": webforms_migration,
-        "blazor_migration": blazor_migration,
-        "auth_migration": auth_migration,
-        "validation": validation,
-        "diff": diff,
-        "code_rewrite_previews": code_rewrite_previews,
-        "build_fixer": build_fixer,
-        "dependency_modernization": dependency_modernization,
-        "architecture_suggestions": architecture_suggestions,
-        "generated_tests": generated_tests,
-        "executive_report": executive_report,
-        "guardrails": {},
-    }
 
 
 def _build_diff(upload_dir: Path, migrated_dir: Path) -> dict:

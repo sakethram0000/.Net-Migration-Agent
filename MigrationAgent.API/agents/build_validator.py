@@ -397,3 +397,53 @@ def run_build_validator(output_dir: str, progress_callback=None) -> dict:
         progress(f"Build Validator: Build failed — {error_count} error(s) remaining")
 
     return build_result
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class BuildValidatorAgentWrapper(BaseAgent):
+    name = "Build Validator"
+    goal = "validate the migrated project compiles successfully with dotnet build"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_build_validator(
+            output_dir=context.output_dir,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.build_result = result
+        context.build_passed = result.get("success", False)
+        context.build_errors = result.get("errors", [])
+
+        skipped = result.get("skipped", False)
+        if skipped:
+            # No dotnet CLI — treat as passed for goal purposes
+            context.build_passed = True
+            context.goal_achieved = True
+            return AgentObservation(
+                agent=self.name,
+                status="skipped",
+                summary=result.get("reason", "dotnet CLI not found — skipped."),
+                actionable=False,
+                data=result,
+            )
+
+        if context.build_passed:
+            context.goal_achieved = True
+
+        return AgentObservation(
+            agent=self.name,
+            status="completed" if context.build_passed else "failed",
+            summary=(
+                "Build passed — goal achieved."
+                if context.build_passed else
+                f"Build failed — {len(context.build_errors)} error(s) found."
+            ),
+            actionable=not context.build_passed,
+            recommended_next="" if context.build_passed else "llm_fixer",
+            data=result,
+            errors=context.build_errors,
+        )

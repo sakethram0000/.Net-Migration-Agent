@@ -510,3 +510,37 @@ def run_webforms_migrator(
         'structural_fixes': structural_fixes,
         'changes': changes,
     }
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class WebFormsMigratorAgent(BaseAgent):
+    name = "Web Forms Agent"
+    goal = "convert .aspx/.ascx/.master Web Forms files to .NET 8 Razor Pages"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_webforms_migrator(
+            output_dir=context.output_dir,
+            from_version=context.from_version,
+            to_version=context.to_version,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.webforms_result = result
+        skipped = result.get("skipped", False)
+        return AgentObservation(
+            agent=self.name,
+            status="skipped" if skipped else "completed",
+            summary=(
+                result.get("reason", "No Web Forms files found.")
+                if skipped else
+                f"Converted {result.get('pages_processed', 0)} page(s), "
+                f"{result.get('controls_replaced', 0)} control(s) replaced."
+            ),
+            actionable=False,
+            recommended_next="blazor_migrator",
+            data=result,
+        )

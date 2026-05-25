@@ -213,3 +213,35 @@ def analyze(upload_dir: str, from_version: str, to_version: str) -> dict:
         "analysis": analysis_text,
         "ui_profile": _detect_ui_profile(upload_path),
     }
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class AnalyzerAgent(BaseAgent):
+    name = "Analyzer Agent"
+    goal = "scan the uploaded project and build a full understanding of what needs to migrate"
+
+    def act(self, context: MigrationContext) -> dict:
+        result = analyze(
+            upload_dir=context.upload_dir,
+            from_version=context.from_version,
+            to_version=context.to_version,
+        )
+        return result
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.analysis = result
+        return AgentObservation(
+            agent=self.name,
+            status="completed" if result.get("success") else "failed",
+            summary=(
+                f"Found {result.get('project_count', 0)} project(s), "
+                f"{result.get('source_file_count', 0)} C# file(s), "
+                f"complexity: {result.get('complexity', {}).get('level', 'Unknown')}."
+            ),
+            actionable=False,
+            recommended_next="migrator",
+            data=result,
+        )

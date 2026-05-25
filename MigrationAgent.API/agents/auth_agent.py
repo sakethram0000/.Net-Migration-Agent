@@ -600,3 +600,30 @@ def _collect_config(root: Path) -> dict:
 
 def _check(name: str, passed: bool, description: str) -> dict:
     return {"name": name, "passed": passed, "description": description}
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class AuthAgentWrapper(BaseAgent):
+    name = "Auth Agent"
+    goal = "detect, migrate and verify authentication patterns"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_auth_agent(
+            upload_dir=context.upload_dir,
+            output_dir=context.output_dir,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.auth_result = result
+        return AgentObservation(
+            agent=self.name,
+            status="completed",
+            summary=result.get("summary", "Auth agent completed."),
+            actionable=False,
+            recommended_next="view_migrator",
+            data=result,
+        )

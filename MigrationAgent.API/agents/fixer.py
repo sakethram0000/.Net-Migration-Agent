@@ -613,3 +613,31 @@ public class {ctx_name} : DbContext
         progress_callback(f"Fix Agent: {len(fixes_applied)} fixes applied successfully.")
 
     return {"success": True, "fixes": fixes_applied, "count": len(fixes_applied), "manual_fixes": manual_fixes}
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class FixerAgentWrapper(BaseAgent):
+    name = "Fix Agent"
+    goal = "apply deterministic structural fixes to the migrated output"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_fixes(
+            output_dir=context.output_dir,
+            upload_dir=context.upload_dir,
+            progress_callback=context.progress_callback,
+            to_version=context.to_version,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.fix_result = result
+        return AgentObservation(
+            agent=self.name,
+            status="completed" if result.get("success") else "failed",
+            summary=f"{result.get('count', 0)} structural fix(es) applied.",
+            actionable=False,
+            recommended_next="guardrail_agent",
+            data=result,
+        )

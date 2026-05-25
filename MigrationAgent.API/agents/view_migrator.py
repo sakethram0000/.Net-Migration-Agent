@@ -320,3 +320,37 @@ def run_view_migrator(
         "viewimports_fixed": viewimports_fixes,
         "changes": changes,
     }
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class ViewMigratorAgent(BaseAgent):
+    name = "View Migration Agent"
+    goal = "migrate Razor views from HTML Helpers to Tag Helpers"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_view_migrator(
+            output_dir=context.output_dir,
+            from_version=context.from_version,
+            to_version=context.to_version,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.view_result = result
+        skipped = result.get("skipped", False)
+        return AgentObservation(
+            agent=self.name,
+            status="skipped" if skipped else "completed",
+            summary=(
+                result.get("reason", "No views found.")
+                if skipped else
+                f"Migrated {result.get('views_processed', 0)} view(s), "
+                f"{result.get('helpers_replaced', 0)} helper(s) replaced."
+            ),
+            actionable=False,
+            recommended_next="webforms_migrator",
+            data=result,
+        )

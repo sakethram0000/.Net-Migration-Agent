@@ -371,3 +371,41 @@ Return ONLY the migrated XML in a ```xml block."""
         time.sleep(2)
 
     return {"success": True, "migrated": migrated, "count": len(migrated), "output_dir": str(output_dir)}
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class MigratorAgent(BaseAgent):
+    name = "LLM Migration Agent"
+    goal = "rewrite all source files to target .NET version using LLM"
+
+    def act(self, context: MigrationContext) -> dict:
+        result = migrate(
+            upload_dir=context.upload_dir,
+            from_version=context.from_version,
+            to_version=context.to_version,
+            progress_callback=context.progress_callback,
+        )
+        return result
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.migrated_files = result.get("migrated", {})
+        # Filter placeholder
+        context.migrated_files = {
+            k: v for k, v in context.migrated_files.items()
+            if v != "[merged into Program.cs]"
+        }
+        success = result.get("success", False)
+        return AgentObservation(
+            agent=self.name,
+            status="completed" if success else "failed",
+            summary=(
+                f"Migrated {result.get('count', 0)} file(s) to {context.to_version}."
+                if success else result.get("error", "Migration failed.")
+            ),
+            actionable=not success,
+            recommended_next="auth_agent" if success else "",
+            data=result,
+        )

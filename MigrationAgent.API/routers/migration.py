@@ -1,17 +1,12 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from pydantic import BaseModel
+from agents.orchestrator import run_orchestrator
 from agents.analyzer import analyze
-from agents.migrator import migrate
-from agents.fixer import run_fixes
-from agents.auth_agent import run_auth_agent
-from agents.view_migrator import run_view_migrator
-from agents.webforms_migrator import run_webforms_migrator
-from agents.blazor_migrator import run_blazor_migrator
-from agents.build_validator import run_build_validator
 from agents.validator import validate
 from agents.reporter import generate_report
 from agents.llm import reset_token_stats, get_token_stats
-from agents.guardrail_agent import run_guardrails
+from middleware.auth import require_user, require_admin
+from database.models import User
 import uuid
 import socket
 import subprocess
@@ -41,7 +36,7 @@ class MigrateRequest(BaseModel):
     from_version: str
     to_version: str
 
-def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str):
+def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str, user_id: str = "", user_email: str = "", user_role: str = "user"):
     try:
         migration_jobs[job_id]["status"] = "running"
         migration_jobs[job_id]["stage"] = "migrating"
@@ -50,136 +45,82 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
 
         def update_progress(message: str):
             migration_jobs[job_id]["progress"] = message
+            # Update stage based on which agent is running
+            msg_lower = message.lower()
+            if "analyzer" in msg_lower:
+                migration_jobs[job_id]["stage"] = "analyzing"
+            elif "llm migration" in msg_lower or "migrating" in msg_lower:
+                migration_jobs[job_id]["stage"] = "migrating"
+            elif "auth agent" in msg_lower:
+                migration_jobs[job_id]["stage"] = "auth"
+            elif "view migration" in msg_lower:
+                migration_jobs[job_id]["stage"] = "views"
+            elif "web forms" in msg_lower:
+                migration_jobs[job_id]["stage"] = "webforms"
+            elif "blazor" in msg_lower:
+                migration_jobs[job_id]["stage"] = "blazor"
+            elif "fix agent" in msg_lower:
+                migration_jobs[job_id]["stage"] = "fixing"
+            elif "guardrail" in msg_lower:
+                migration_jobs[job_id]["stage"] = "guardrails"
+            elif "build validator" in msg_lower:
+                migration_jobs[job_id]["stage"] = "build_validate"
+            elif "llm fixer" in msg_lower:
+                migration_jobs[job_id]["stage"] = "llm_fixing"
+            elif "goal achieved" in msg_lower:
+                migration_jobs[job_id]["stage"] = "completed"
 
         # Clear previous output before starting fresh
         output_path = Path(OUTPUT_DIR)
         if output_path.exists():
             shutil.rmtree(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
-        # Clear previous zip if exists
         old_zip = Path(OUTPUT_DIR).parent / "migrated_project.zip"
         if old_zip.exists():
             old_zip.unlink()
 
-        # Step 1 — LLM Migration
-        result = migrate(upload_dir, from_version, to_version, progress_callback=update_progress)
+        # ── Run the orchestrator ───────────────────────────────────────────────
+        context = run_orchestrator(
+            job_id=job_id,
+            upload_dir=upload_dir,
+            output_dir=OUTPUT_DIR,
+            from_version=from_version,
+            to_version=to_version,
+            progress_callback=update_progress,
+            user_id=user_id,
+            user_email=user_email,
+            user_role=user_role,
+        )
 
-        if not result["success"]:
+        # ── Check if migrator failed ──────────────────────────────────────
+        if context.status == "failed":
             migration_jobs[job_id]["status"] = "failed"
             migration_jobs[job_id]["stage"] = "failed"
-            migration_jobs[job_id]["error"] = result.get("error", "Unknown error")
+            migration_jobs[job_id]["error"] = "Migration failed — check progress log."
             migration_jobs[job_id]["progress"] = "Migration failed."
             return
 
-        # Step 2 — Auth Agent (deterministic, no LLM)
-        update_progress("Auth Agent: Detecting and migrating authentication...")
-        auth_result = {}
-        try:
-            auth_result = run_auth_agent(
-                upload_dir=upload_dir,
-                output_dir=OUTPUT_DIR,
-                progress_callback=update_progress
-            )
-        except Exception as ae:
-            update_progress(f"Auth Agent warning: {str(ae)}")
-
-        # Step 3 — View Migration Agent (only runs if .cshtml files exist)
-        update_progress("View Migration Agent: Checking for Razor views...")
-        view_result = {}
-        try:
-            view_result = run_view_migrator(
-                output_dir=OUTPUT_DIR,
-                from_version=from_version,
-                to_version=to_version,
-                progress_callback=update_progress
-            )
-        except Exception as ve:
-            update_progress(f"View Migration Agent warning: {str(ve)}")
-
-        # Step 4 — Web Forms Migration Agent (only runs if .aspx files exist)
-        update_progress("Web Forms Agent: Checking for Web Forms files...")
-        webforms_result = {}
-        try:
-            webforms_result = run_webforms_migrator(
-                output_dir=OUTPUT_DIR,
-                from_version=from_version,
-                to_version=to_version,
-                progress_callback=update_progress
-            )
-        except Exception as we:
-            update_progress(f"Web Forms Agent warning: {str(we)}")
-
-        # Step 5 — Blazor Migration Agent (only runs if .razor files exist)
-        update_progress("Blazor Agent: Checking for Blazor components...")
-        blazor_result = {}
-        try:
-            blazor_result = run_blazor_migrator(
-                output_dir=OUTPUT_DIR,
-                from_version=from_version,
-                to_version=to_version,
-                progress_callback=update_progress
-            )
-        except Exception as be:
-            update_progress(f"Blazor Agent warning: {str(be)}")
-
-        # Step 6 — Fix Agent (deterministic fixes, no LLM)
-        update_progress("Fix Agent: Applying structural fixes...")
-        manual_fixes = []
-        try:
-            fix_result = run_fixes(
-                output_dir=OUTPUT_DIR,
-                upload_dir=upload_dir,
-                progress_callback=update_progress,
-                to_version=to_version
-            )
-            fix_count = fix_result.get("count", 0)
-            manual_fixes = fix_result.get("manual_fixes", [])
-            update_progress(f"Fix Agent: {fix_count} fixes applied successfully.")
-        except Exception as fe:
-            fix_count = 0
-            update_progress(f"Fix Agent warning: {str(fe)}")
-
-        # Step 7 — Guardrail Agent (read-only scan)
-        update_progress("Guardrail Agent: Scanning architecture and code quality...")
-        guardrail_result = {}
-        try:
-            guardrail_result = run_guardrails(
-                output_dir=OUTPUT_DIR,
-                progress_callback=update_progress
-            )
-        except Exception as ge:
-            update_progress(f"Guardrail Agent warning: {str(ge)}")
-
-        # Step 8 — Build Validator (pre-clean + build loop + auto-fix)
-        update_progress("Build Validator: Starting pre-build cleanup and validation...")
-        build_result = {}
-        try:
-            build_result = run_build_validator(
-                output_dir=OUTPUT_DIR,
-                progress_callback=update_progress
-            )
-        except Exception as bve:
-            update_progress(f"Build Validator warning: {str(bve)}")
-
-        # Step 7 — done
+        # ── Build final result from context ───────────────────────────────
         migration_jobs[job_id]["status"] = "completed"
         migration_jobs[job_id]["stage"] = "completed"
-        # Filter out the [merged into Program.cs] placeholder from migrated dict
-        result["migrated"] = {k: v for k, v in result.get("migrated", {}).items() if v != "[merged into Program.cs]"}
-        migration_jobs[job_id]["result"] = result
-        migration_jobs[job_id]["result"]["manual_fixes"] = manual_fixes
-        migration_jobs[job_id]["result"]["auth"] = auth_result
-        migration_jobs[job_id]["result"]["view_migration"] = view_result
-        migration_jobs[job_id]["result"]["webforms_migration"] = webforms_result
-        migration_jobs[job_id]["result"]["blazor_migration"] = blazor_result
-        migration_jobs[job_id]["result"]["build_validation"] = build_result
-        migration_jobs[job_id]["result"]["guardrails"] = guardrail_result
+        migration_jobs[job_id]["result"] = {
+            "success": True,
+            "count": len(context.migrated_files),
+            "migrated": context.migrated_files,
+            "manual_fixes": context.fix_result.get("manual_fixes", []),
+            "auth": context.auth_result,
+            "view_migration": context.view_result,
+            "webforms_migration": context.webforms_result,
+            "blazor_migration": context.blazor_result,
+            "build_validation": context.build_result,
+            "guardrails": context.guardrail_result,
+            "orchestrator": context.to_summary_dict(),
+        }
         migration_jobs[job_id]["token_stats"] = get_token_stats()
-        build_passed = build_result.get("success", False)
         migration_jobs[job_id]["progress"] = (
-            f"Migration completed. {result['count']} files migrated. "
-            f"{fix_count} fixes applied. "
-            f"Build {'passed' if build_passed else 'needs review'}."
+            f"Migration completed. {len(context.migrated_files)} file(s) migrated. "
+            f"{context.attempts} build-fix attempt(s). "
+            f"Build {'passed' if context.build_passed else 'needs review'}."
         )
 
     except Exception as e:
@@ -188,7 +129,10 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         migration_jobs[job_id]["progress"] = f"Migration failed: {str(e)}"
 
 @router.post("/analyze")
-def run_analysis(request: MigrationRequest):
+def run_analysis(
+    request: MigrationRequest,
+    current_user: User = Depends(require_user)
+):
     return analyze(
         upload_dir=UPLOAD_DIR,
         from_version=request.from_version,
@@ -196,23 +140,40 @@ def run_analysis(request: MigrationRequest):
     )
 
 @router.post("/migrate")
-def run_migration(request: MigrateRequest, background_tasks: BackgroundTasks):
+def run_migration(
+    request: MigrateRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_user)
+):
     job_id = str(uuid.uuid4())
     migration_jobs[job_id] = {
         "status": "queued",
         "stage": "queued",
         "step": 0,
         "progress": "Migration queued...",
-        "created_at": time.time()
+        "created_at": time.time(),
+        "user_id": current_user.id,
+        "user_email": current_user.email,
+        "user_role": current_user.role,
     }
-    background_tasks.add_task(run_migration_job, job_id, UPLOAD_DIR, request.from_version, request.to_version)
+    background_tasks.add_task(
+        run_migration_job, job_id, UPLOAD_DIR,
+        request.from_version, request.to_version,
+        current_user.id, current_user.email, current_user.role
+    )
     return {"job_id": job_id, "status": "queued", "message": "Migration started in background"}
 
 @router.get("/status/{job_id}")
-def get_migration_status(job_id: str):
+def get_migration_status(
+    job_id: str,
+    current_user: User = Depends(require_user)
+):
     if job_id not in migration_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     job = migration_jobs[job_id]
+    # Users can only see their own jobs — admins can see all
+    if current_user.role != "admin" and job.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied.")
     return {
         "job_id": job_id,
         "status": job["status"],
@@ -225,11 +186,14 @@ def get_migration_status(job_id: str):
     }
 
 @router.post("/validate")
-def run_validation():
+def run_validation(current_user: User = Depends(require_user)):
     return validate(output_dir=OUTPUT_DIR, progress_callback=None)
 
 @router.get("/token-stats/{job_id}")
-def get_token_stats_endpoint(job_id: str):
+def get_token_stats_endpoint(
+    job_id: str,
+    current_user: User = Depends(require_user)
+):
     if job_id not in migration_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     return migration_jobs[job_id].get("token_stats", {
@@ -238,7 +202,7 @@ def get_token_stats_endpoint(job_id: str):
     })
 
 @router.get("/report")
-def get_report():
+def get_report(current_user: User = Depends(require_user)):
     return generate_report()
 
 

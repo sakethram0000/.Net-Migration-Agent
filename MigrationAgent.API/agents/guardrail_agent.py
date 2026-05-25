@@ -374,3 +374,29 @@ def _empty_result(reason: str) -> dict:
         "passed": [], "total": 0, "passed_count": 0,
         "violation_count": 0, "summary": reason,
     }
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class GuardrailAgentWrapper(BaseAgent):
+    name = "Guardrail Agent"
+    goal = "scan migrated output for architecture and code quality violations"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_guardrails(
+            output_dir=context.output_dir,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.guardrail_result = result
+        return AgentObservation(
+            agent=self.name,
+            status="completed",
+            summary=result.get("summary", "Guardrail scan completed."),
+            actionable=False,
+            recommended_next="build_validator",
+            data=result,
+        )

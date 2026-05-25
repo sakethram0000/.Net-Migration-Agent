@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from typing import List
 import aiofiles
 import os
@@ -10,6 +10,8 @@ from pydantic import BaseModel
 import httpx
 import re
 import shutil
+from middleware.auth import require_user
+from database.models import User
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -17,7 +19,10 @@ BASE_DIR = Path(__file__).parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 
 @router.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...)):
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    current_user: User = Depends(require_user)
+):
     if UPLOAD_DIR.exists():
         shutil.rmtree(UPLOAD_DIR)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,7 +45,9 @@ async def upload_files(files: List[UploadFile] = File(...)):
     return {"success": True, "files": uploaded, "count": len(uploaded)}
 
 @router.get("/download")
-async def download_migrated_project():
+async def download_migrated_project(
+    current_user: User = Depends(require_user)
+):
     migrated_dir = BASE_DIR / "outputs" / "migrated"
     if not migrated_dir.exists() or not any(migrated_dir.rglob("*")):
         raise HTTPException(status_code=404, detail="No migrated project available — run migration first")
@@ -77,7 +84,10 @@ class GithubRequest(BaseModel):
     url: str
 
 @router.post("/upload-github")
-async def upload_from_github(request: GithubRequest):
+async def upload_from_github(
+    request: GithubRequest,
+    current_user: User = Depends(require_user)
+):
     url = request.url.strip().rstrip("/")
     match = re.match(r"https?://github\.com/([^/]+)/([^/]+)", url)
     if not match:

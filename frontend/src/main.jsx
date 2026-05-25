@@ -20,6 +20,14 @@ function App() {
   const [selectedOutput, setSelectedOutput] = useState(null);
   const [tokenStats, setTokenStats] = useState(null);
   const [ollamaStatus, setOllamaStatus] = useState(null);
+  const [user, setUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('ma_user') || 'null'); } catch { return null; }
+  });
+  const [authMode, setAuthMode] = useState('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -150,6 +158,81 @@ function App() {
     setTerminal((prev) => `${prev === 'Terminal output will appear here when migration runs...' ? '' : `${prev}\n`}${line}`);
   }
 
+  // ── Auth helpers ──────────────────────────────────────────────────────
+  function getToken() {
+    return localStorage.getItem('ma_token') || '';
+  }
+
+  function logout() {
+    localStorage.removeItem('ma_token');
+    localStorage.removeItem('ma_user');
+    setUser(null);
+  }
+
+  async function handleAuth(e) {
+    e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+      const data = await postJson(endpoint, { email: authEmail, password: authPassword });
+      localStorage.setItem('ma_token', data.token);
+      localStorage.setItem('ma_user', JSON.stringify(data.user));
+      setUser(data.user);
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  // ── Show login screen if not authenticated ────────────────────────────
+  if (!user) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}>
+        <div style={{ width: 380, background: '#fff', borderRadius: 12, padding: '36px 32px', boxShadow: '0 4px 24px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0' }}>
+          <div style={{ textAlign: 'center', marginBottom: 28 }}>
+            <div style={{ fontSize: 32, fontWeight: 900, color: '#1e293b', marginBottom: 4 }}>.N</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>.NET Migration Agent</div>
+            <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{authMode === 'login' ? 'Sign in to your account' : 'Create a new account'}</div>
+          </div>
+          <form onSubmit={handleAuth}>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 6 }}>Email</label>
+              <input
+                type="email" required value={authEmail}
+                onChange={e => setAuthEmail(e.target.value)}
+                placeholder="you@example.com"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 14, boxSizing: 'border-box', outline: 'none' }}
+              />
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 6 }}>Password</label>
+              <input
+                type="password" required value={authPassword}
+                onChange={e => setAuthPassword(e.target.value)}
+                placeholder="••••••••"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 14, boxSizing: 'border-box', outline: 'none' }}
+              />
+            </div>
+            {authError && <div style={{ marginBottom: 14, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 7, fontSize: 13, color: '#dc2626' }}>{authError}</div>}
+            <button type="submit" disabled={authBusy}
+              style={{ width: '100%', padding: '11px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: authBusy ? 'not-allowed' : 'pointer', opacity: authBusy ? 0.7 : 1 }}>
+              {authBusy ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+          <div style={{ textAlign: 'center', marginTop: 18, fontSize: 13, color: '#64748b' }}>
+            {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+            <span onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }}
+              style={{ color: '#3b82f6', fontWeight: 700, cursor: 'pointer' }}>
+              {authMode === 'login' ? 'Register' : 'Sign In'}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <section className="ma-hero">
@@ -167,6 +250,11 @@ function App() {
             <span className="hero-pill"><span className="pill-dot green"></span>.NET 8/9/10</span>
             <span className="hero-pill"><span className="pill-dot orange"></span>Build Validation</span>
             <OllamaStatus status={ollamaStatus} />
+            <span className="hero-pill" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+              <span className="pill-dot" style={{ background: '#22c55e' }}></span>
+              {user?.email} ({user?.role})
+            </span>
+            <button onClick={logout} style={{ fontSize: 12, padding: '4px 12px', borderRadius: 20, border: '1px solid #e2e8f0', background: '#fff', cursor: 'pointer', fontWeight: 600, color: '#64748b' }}>Logout</button>
           </div>
         </div>
       </section>
@@ -270,6 +358,7 @@ function App() {
             <Output title="Architecture Guardrails" ready={!!report?.guardrails} onClick={() => setSelectedOutput(outputContent('Architecture Guardrails', report.guardrails))} />
             <Output title="UI Migration Report" ready={!!report} onClick={() => setSelectedOutput(outputContent('UI Migration Report', { view: report?.view_migration, webforms: report?.webforms_migration, blazor: report?.blazor_migration }))} />
             <Output title="Change Log" ready={!!report} onClick={() => setSelectedOutput(outputContent('Change Log', report?.changes || []))} />
+            <Output title="Orchestrator Decisions" ready={!!report?.orchestrator?.decision_log} onClick={() => setSelectedOutput(outputContent('Orchestrator Decisions', report.orchestrator))} />
             <Output title="Migrated Project Zip" ready={job?.status === 'completed'} onClick={() => window.location.href = `${API_BASE}/api/files/download`} />
           </div>
           {selectedOutput && <OutputDetail output={selectedOutput} jobId={job?.job_id} />}
@@ -394,27 +483,30 @@ function Findings({ inventory, report }) {
 
 function Actions({ job }) {
   const agents = [
-    { name: 'Ingestion Agent',      role: 'Extract upload and create isolated workspace', stages: ['queued'] },
-    { name: 'Analyzer Agent',       role: 'Scan projects, packages and detect patterns',  stages: ['migrating'] },
-    { name: 'LLM Migration Agent',  role: 'Rewrite source files to target .NET version',  stages: ['migrating'] },
-    { name: 'View Migration Agent',  role: 'Migrate Razor views — HTML Helpers to Tag Helpers', stages: ['migrating'] },
-    { name: 'Web Forms Agent',        role: 'Convert .aspx/.ascx/.master to .NET 8 Razor Pages', stages: ['migrating'] },
-    { name: 'Blazor Agent',            role: 'Migrate .razor components to .NET 8',               stages: ['migrating'] },
-    { name: 'Auth Agent',           role: 'Detect, migrate and verify authentication',     stages: ['migrating'] },
-    { name: 'Fix Agent',            role: 'Apply deterministic structural fixes',          stages: ['migrating'] },
-    { name: 'Build Validator',      role: 'Pre-clean legacy files, build and auto-fix',   stages: ['validate', 'completed', 'needs-review'] },
+    { name: 'Analyzer Agent',       role: 'Scan projects, packages — orchestrator plans from this', stages: ['analyzing'] },
+    { name: 'LLM Migration Agent',  role: 'Rewrite source files to target .NET version',            stages: ['migrating'] },
+    { name: 'Auth Agent',           role: 'Detect, migrate and verify authentication',               stages: ['auth'] },
+    { name: 'View Migration Agent', role: 'Migrate Razor views — HTML Helpers to Tag Helpers',      stages: ['views'] },
+    { name: 'Web Forms Agent',      role: 'Convert .aspx/.ascx/.master to Razor Pages',             stages: ['webforms'] },
+    { name: 'Blazor Agent',         role: 'Migrate .razor components to .NET 8',                    stages: ['blazor'] },
+    { name: 'Fix Agent',            role: 'Apply deterministic structural fixes',                   stages: ['fixing'] },
+    { name: 'Guardrail Agent',      role: 'Scan architecture and code quality violations',          stages: ['guardrails'] },
+    { name: 'Build Validator',      role: 'Pre-clean, build and auto-fix',                         stages: ['build_validate'] },
+    { name: 'LLM Fixer Agent',      role: 'Fix broken files using exact build error context',       stages: ['llm_fixing'] },
+    { name: 'Reporter Agent',       role: 'Generate full report from context — no re-running',     stages: ['completed'] },
   ];
 
   const stage = job?.stage || '';
   const completed = job?.status === 'completed' || job?.status === 'needs_review';
 
+  const stageOrder = ['queued','analyzing','migrating','auth','views','webforms','blazor','fixing','guardrails','build_validate','llm_fixing','completed'];
+
   function getState(agent) {
     if (!job) return 'waiting';
     if (completed) return 'done';
     if (agent.stages.includes(stage)) return 'active';
-    const order = ['queued', 'migrating', 'validate', 'completed'];
-    const agentIdx = Math.max(...agent.stages.map(s => order.indexOf(s)));
-    const currentIdx = order.indexOf(stage);
+    const agentIdx = Math.max(...agent.stages.map(s => stageOrder.indexOf(s)));
+    const currentIdx = stageOrder.indexOf(stage);
     if (currentIdx > agentIdx) return 'done';
     return 'waiting';
   }
@@ -423,6 +515,7 @@ function Actions({ job }) {
     done:    { bg: '#22c55e', color: '#fff', icon: '✓' },
     active:  { bg: '#3b82f6', color: '#fff', icon: '●' },
     waiting: { bg: '#e2e8f0', color: '#94a3b8', icon: '○' },
+    skipped: { bg: '#f1f5f9', color: '#94a3b8', icon: '—' },
   };
 
   return (
@@ -475,6 +568,7 @@ function OutputDetail({ output, jobId }) {
       {output.type === 'auth' && <AuthMigrationDetail auth={output.data} />}
       {output.type === 'guardrails' && <GuardrailDetail data={output.data} />}
       {output.type === 'uimigration' && <UiMigrationDetail data={output.data} />}
+      {output.type === 'orchestrator' && <OrchestratorDecisionsDetail data={output.data} />}
       <pre className="detail-json">{JSON.stringify(output.data, null, 2)}</pre>
     </section>
   );
@@ -563,6 +657,7 @@ function outputContent(title, data) {
     'Auth Migration Report': 'auth',
     'Architecture Guardrails': 'guardrails',
     'UI Migration Report': 'uimigration',
+    'Orchestrator Decisions': 'orchestrator',
   };
   const reportKindByTitle = {
     'Migration Summary': 'executive',
@@ -585,17 +680,11 @@ function getStageIndex(job) {
   if (!job) return -1;
   if (job.status === 'completed' || job.status === 'needs_review') return 4;
   const map = {
-    queued: 0,
-    ingest: 0,
-    inventory: 1,
-    migrating: 2,
-    'upgrade-projects': 2,
-    'rewrite-code': 2,
-    validate: 3,
-    package: 4,
-    completed: 4,
-    'needs-review': 4,
-    failed: 4,
+    queued: 0, analyzing: 1,
+    migrating: 2, auth: 2, views: 2, webforms: 2, blazor: 2,
+    fixing: 2, guardrails: 2,
+    build_validate: 3, llm_fixing: 3,
+    completed: 4, failed: 4,
   };
   return map[job.stage] ?? 0;
 }
@@ -609,21 +698,29 @@ function getStepState(index, stageIndex, job) {
 }
 
 async function postJson(url, payload) {
-  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const token = localStorage.getItem('ma_token') || '';
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: JSON.stringify(payload) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || data.error || response.statusText);
   return data;
 }
 
 async function postForm(url, form) {
-  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', body: form });
+  const token = localStorage.getItem('ma_token') || '';
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: form });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
   return data;
 }
 
 async function fetchJson(url, options = {}) {
-  const opts = options;
+  const token = localStorage.getItem('ma_token') || '';
+  const opts = { ...options };
+  if (token) opts.headers = { ...(opts.headers || {}), 'Authorization': `Bearer ${token}` };
   const response = await fetch(`${API_BASE}${url}`, opts);
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
@@ -991,6 +1088,75 @@ function GuardrailDetail({ data }) {
       )}
     </div>
   );
+}
+
+function OrchestratorDecisions({ orchestrator }) {
+  if (!orchestrator?.decision_log?.length) return null;
+  const decisionColor = {
+    goal_achieved:          '#22c55e',
+    run_llm_fixer:          '#3b82f6',
+    run_deterministic_fixer:'#f59e0b',
+    skip_build:             '#94a3b8',
+    escalate_to_user:       '#ef4444',
+    give_up:                '#ef4444',
+    abort:                  '#ef4444',
+    plan_phase1:            '#8b5cf6',
+    run_view_migrator:      '#06b6d4',
+    skip_view_migrator:     '#94a3b8',
+    run_webforms_migrator:  '#06b6d4',
+    skip_webforms_migrator: '#94a3b8',
+    run_blazor_migrator:    '#06b6d4',
+    skip_blazor_migrator:   '#94a3b8',
+  };
+  return (
+    <section className="ma-card">
+      <div className="ma-card-header">
+        <div className="ma-card-title">Orchestrator Decision Log</div>
+        <span className="section-status">
+          {orchestrator.goal_achieved ? '✅ Goal Achieved' : '⚠️ Needs Review'}
+          {' — '}{orchestrator.decisions_made} decision(s), {orchestrator.agents_run} agent(s) ran
+        </span>
+      </div>
+      <div className="ma-card-body">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 20 }}>
+          <div style={{ padding: '12px 14px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
+            <div style={{ fontSize: 22, fontWeight: 900, color: '#22c55e' }}>{orchestrator.agents_run}</div>
+            <div style={{ fontSize: 12, color: '#166534', fontWeight: 700 }}>Agents Run</div>
+          </div>
+          <div style={{ padding: '12px 14px', background: '#eff6ff', borderRadius: 8, border: '1px solid #bfdbfe' }}>
+            <div style={{ fontSize: 22, fontWeight: 900, color: '#3b82f6' }}>{orchestrator.decisions_made}</div>
+            <div style={{ fontSize: 12, color: '#1e40af', fontWeight: 700 }}>Decisions Made</div>
+          </div>
+          <div style={{ padding: '12px 14px', background: '#faf5ff', borderRadius: 8, border: '1px solid #e9d5ff' }}>
+            <div style={{ fontSize: 22, fontWeight: 900, color: '#8b5cf6' }}>{orchestrator.elapsed_seconds}s</div>
+            <div style={{ fontSize: 12, color: '#6d28d9', fontWeight: 700 }}>Elapsed</div>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gap: 8 }}>
+          {orchestrator.decision_log.map((d, i) => {
+            const color = decisionColor[d.decision] || '#64748b';
+            return (
+              <div key={i} style={{ display: 'flex', gap: 12, padding: '10px 14px', background: '#f8fafc', borderRadius: 8, borderLeft: `4px solid ${color}` }}>
+                <div style={{ flexShrink: 0, marginTop: 2 }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color, background: `${color}18`, padding: '2px 8px', borderRadius: 999 }}>{d.decision}</span>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, color: '#475569', marginBottom: 2 }}><strong style={{ color: '#1e293b' }}>Observed:</strong> {d.observation}</div>
+                  <div style={{ fontSize: 12, color: '#64748b' }}><strong style={{ color: '#1e293b' }}>Reason:</strong> {d.reason}</div>
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8', flexShrink: 0 }}>Round {d.round}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OrchestratorDecisionsDetail({ data }) {
+  if (!data) return <div className="detail-list"><div>No orchestrator data available.</div></div>;
+  return <OrchestratorDecisions orchestrator={data} />;
 }
 
 createRoot(document.getElementById('root')).render(<App />);

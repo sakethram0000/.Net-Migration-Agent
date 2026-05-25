@@ -405,3 +405,37 @@ def run_blazor_migrator(
         'structural_fixes': structural_fixes,
         'changes': changes,
     }
+
+
+# ── Agent wrapper ─────────────────────────────────────────────────────────
+from agents.base_agent import BaseAgent
+from agents.context import MigrationContext, AgentObservation
+
+class BlazorMigratorAgent(BaseAgent):
+    name = "Blazor Agent"
+    goal = "migrate .razor Blazor components to .NET 8"
+
+    def act(self, context: MigrationContext) -> dict:
+        return run_blazor_migrator(
+            output_dir=context.output_dir,
+            from_version=context.from_version,
+            to_version=context.to_version,
+            progress_callback=context.progress_callback,
+        )
+
+    def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
+        context.blazor_result = result
+        skipped = result.get("skipped", False)
+        return AgentObservation(
+            agent=self.name,
+            status="skipped" if skipped else "completed",
+            summary=(
+                result.get("reason", "No Blazor files found.")
+                if skipped else
+                f"Migrated {result.get('components_processed', 0)} component(s), "
+                f"{result.get('fixes_applied', 0)} fix(es) applied."
+            ),
+            actionable=False,
+            recommended_next="fixer",
+            data=result,
+        )
