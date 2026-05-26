@@ -1,5 +1,9 @@
 # .NET Migration Agent
 
+> **Not just automation — this is a true agentic system.**
+> 
+> Our migration tool orchestrates multiple specialized agents (Analyzer, LLM Migrator, Auth Agent, Fix Agent, Build Validator, and more) in a coordinated pipeline. Each agent has a defined role, enabling reliable, intelligent, and context-aware .NET migrations that go far beyond simple scripting or automation.
+
 ## What This Agent Supports
 
 - Migrates C#/.NET projects from .NET Framework 4.5–4.8, .NET Core 3.1, and .NET 5/6/7 to modern .NET 8.
