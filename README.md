@@ -1,5 +1,20 @@
 # .NET Migration Agent
 
+## What This Agent Supports
+
+- Migrates C#/.NET projects from .NET Framework 4.5–4.8, .NET Core 3.1, and .NET 5/6/7 to modern .NET 8.
+- Handles ASP.NET MVC/Web API projects, class libraries, and most standard .NET solutions.
+- Automatically rewrites `.cs` and `.csproj` files to .NET 8/C# 12 using Groq LLM, following strict migration rules.
+- Detects and upgrades authentication (JWT, Identity, Cookie, Forms, Windows) to .NET 8 equivalents using deterministic templates.
+- Fixes common structural issues (removes obsolete packages, updates project files, applies best practices) without LLM.
+- Runs build validation using the .NET 8 SDK and provides a readiness score, migration report, and manual fix list.
+- Outputs a downloadable, buildable .NET 8 project with a detailed migration report.
+
+**Limitations:**
+- Does not migrate WinForms, WPF, Xamarin, or UWP projects.
+- Does not handle non-C# languages or projects with heavy native interop.
+- Custom or highly complex authentication/middleware may require manual review.
+
 An AI-powered agentic tool that automatically migrates legacy .NET Framework applications to modern .NET 8. Upload your project, click Run Migration, and download the migrated code.
 
 **Live Demo:** [https://dotnet-migration-agent.onrender.com](https://dotnet-migration-agent.onrender.com)
