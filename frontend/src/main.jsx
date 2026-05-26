@@ -4,12 +4,19 @@ import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const steps = ['Ingest', 'Analyze', 'Transform', 'Validate', 'Package'];
+let sessionToken = '';
+
+function getToken() {
+  return sessionToken;
+}
 
 function App() {
   const [fromVersion, setFromVersion] = useState('.NET Framework 4.8');
   const [toVersion, setToVersion] = useState('.NET 8');
   const [files, setFiles] = useState([]);
   const [githubUrl, setGithubUrl] = useState('');
+  const [githubAuth, setGithubAuth] = useState('public');
+  const [githubToken, setGithubToken] = useState('');
   const [uploadMode, setUploadMode] = useState('local');
   const [inventory, setInventory] = useState(null);
   const [job, setJob] = useState(null);
@@ -20,9 +27,7 @@ function App() {
   const [selectedOutput, setSelectedOutput] = useState(null);
   const [tokenStats, setTokenStats] = useState(null);
   const [ollamaStatus, setOllamaStatus] = useState(null);
-  const [user, setUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('ma_user') || 'null'); } catch { return null; }
-  });
+  const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -35,6 +40,7 @@ function App() {
       .then((data) => setOllamaStatus(data))
       .catch(() => setOllamaStatus({ connected: false, status: 'unreachable' }));
   }, []);
+
 
   const scopes = useMemo(() => [
     { label: 'Projects',   key: 'project_count',      value: () => inventory?.project_count || 0 },
@@ -69,7 +75,8 @@ function App() {
     if (!githubUrl.trim()) return;
     setBusy('github');
     try {
-      const data = await postJson('/api/files/upload-github', { url: githubUrl });
+      const payload = githubAuth === 'private' && githubToken ? { url: githubUrl, token: githubToken } : { url: githubUrl };
+      const data = await postJson('/api/files/upload-github', payload);
       setFiles([{ name: data.repo, type: 'github', size: data.total_files || 0 }]);
       log(`Fetched ${data.repo} from ${data.branch}.`);
       await runAnalyze();
@@ -77,6 +84,8 @@ function App() {
       log(`GitHub fetch failed: ${err.message}`);
     } finally {
       setBusy('');
+      // clear token from memory after use
+      setGithubToken('');
     }
   }
 
@@ -159,13 +168,9 @@ function App() {
   }
 
   // ── Auth helpers ──────────────────────────────────────────────────────
-  function getToken() {
-    return localStorage.getItem('ma_token') || '';
-  }
 
   function logout() {
-    localStorage.removeItem('ma_token');
-    localStorage.removeItem('ma_user');
+    sessionToken = '';
     setUser(null);
   }
 
@@ -176,8 +181,7 @@ function App() {
     try {
       const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
       const data = await postJson(endpoint, { email: authEmail, password: authPassword });
-      localStorage.setItem('ma_token', data.token);
-      localStorage.setItem('ma_user', JSON.stringify(data.user));
+      sessionToken = data.token;
       setUser(data.user);
     } catch (err) {
       setAuthError(err.message);
@@ -301,7 +305,16 @@ function App() {
               ) : (
                 <div className="github-input-area">
                   <input className="github-input" value={githubUrl} onChange={(event) => setGithubUrl(event.target.value)} placeholder="https://github.com/owner/repo" />
-                  <button className="browse-btn" disabled={busy === 'github'} onClick={fetchGithub}>{busy === 'github' ? 'Fetching...' : 'Fetch Repository'}</button>
+                  <div className="github-input-row">
+                    <select value={githubAuth} onChange={(e) => setGithubAuth(e.target.value)}>
+                      <option value="public">Public</option>
+                      <option value="private">Private (use PAT)</option>
+                    </select>
+                    {githubAuth === 'private' && (
+                      <input type="password" className="github-input" placeholder="Personal Access Token (PAT)" value={githubToken} onChange={(e) => setGithubToken(e.target.value)} />
+                    )}
+                    <button className="browse-btn" disabled={busy === 'github'} onClick={fetchGithub}>{busy === 'github' ? 'Fetching...' : 'Fetch Repository'}</button>
+                  </div>
                 </div>
               )}
               <div className="file-list">{files.map((file) => <div className="file-item" key={file.name}><span>{file.type}</span><span className="fn">{file.name}</span><span className="fs">{file.size}</span></div>)}</div>
@@ -698,7 +711,7 @@ function getStepState(index, stageIndex, job) {
 }
 
 async function postJson(url, payload) {
-  const token = localStorage.getItem('ma_token') || '';
+  const token = getToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: JSON.stringify(payload) });
@@ -708,7 +721,7 @@ async function postJson(url, payload) {
 }
 
 async function postForm(url, form) {
-  const token = localStorage.getItem('ma_token') || '';
+  const token = getToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: form });
@@ -718,7 +731,7 @@ async function postForm(url, form) {
 }
 
 async function fetchJson(url, options = {}) {
-  const token = localStorage.getItem('ma_token') || '';
+  const token = getToken();
   const opts = { ...options };
   if (token) opts.headers = { ...(opts.headers || {}), 'Authorization': `Bearer ${token}` };
   const response = await fetch(`${API_BASE}${url}`, opts);

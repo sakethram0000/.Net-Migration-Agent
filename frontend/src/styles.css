@@ -452,6 +452,31 @@ a:focus-visible {
   gap: 10px;
 }
 
+/* Responsive row for GitHub input + selector + button */
+.github-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.github-input-row .github-input {
+  flex: 1 1 320px;
+  min-width: 160px;
+}
+.github-input-row select {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  font-weight: 700;
+}
+.github-input-row .browse-btn {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
 .file-list {
   display: grid;
   gap: 8px;

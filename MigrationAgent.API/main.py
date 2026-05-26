@@ -1,3 +1,12 @@
+# Load .env FIRST before importing any modules that need environment variables
+import os
+from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,14 +15,6 @@ from routers import files, ollama_router, migration
 from routers.auth import router as auth_router
 from contextlib import asynccontextmanager
 import shutil
-from pathlib import Path
-
-# Load .env for local development
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env")
-except ImportError:
-    pass
 
 BASE_DIR = Path(__file__).parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
@@ -33,12 +34,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Migration Agent API", version="1.0.0", lifespan=lifespan)
 
+allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if not allowed_origins:
+    allowed_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
 )
 
 app.include_router(auth_router)

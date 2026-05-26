@@ -2,6 +2,7 @@
 Auth Router — register, login, profile, user management endpoints.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
+import os
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from database.db import get_db
@@ -39,7 +40,23 @@ class UpdateRoleRequest(BaseModel):
 
 @router.post("/register", status_code=201)
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user. First user is automatically admin."""
+    """Register a new user.
+
+    Notes:
+    - Registration can be disabled in production by setting environment variable
+      `ALLOW_REGISTRATION=false` (default: true).
+    - If registration is allowed and there are no users, the first registered user
+      becomes admin (convenient for local development). For production, set
+      `ALLOW_REGISTRATION=false` and create an admin via an offline script.
+    """
+    # Registration gate (default enabled for local/dev). Set to 'false' in prod.
+    allow_reg = os.environ.get("ALLOW_REGISTRATION", "true").lower() == "true"
+    if not allow_reg:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is disabled. Create an admin via script or enable ALLOW_REGISTRATION."
+        )
+
     # Check if email already exists
     existing = db.query(User).filter(User.email == request.email).first()
     if existing:
@@ -55,7 +72,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
             detail="Role must be 'admin' or 'user'."
         )
 
-    # First user ever registered becomes admin automatically
+    # First user ever registered becomes admin automatically (only when registration enabled)
     user_count = db.query(User).count()
     role = "admin" if user_count == 0 else request.role
 

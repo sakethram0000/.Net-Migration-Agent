@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 from database.db import get_db
 from database.models import User
 
-SECRET_KEY  = os.environ.get("JWT_SECRET_KEY", "fallback-secret")
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY is required in the environment and must not be empty.")
 ALGORITHM   = os.environ.get("JWT_ALGORITHM", "HS256")
 EXPIRE_MINS = int(os.environ.get("JWT_EXPIRE_MINUTES", "1440"))
 
