@@ -204,6 +204,30 @@ Open **http://127.0.0.1:8000**
 | `GROQ_API_KEY_2` | No | Secondary key for rate limit rotation |
 | `GROQ_MODEL` | No | Groq model name (default: `llama-3.3-70b-versatile`) |
 
+### Backend Environment Variables (Database & Auth)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | SQLAlchemy connection string for Postgres (e.g. `postgresql://user:pass@host:port/dbname`) |
+| `JWT_SECRET_KEY` | Yes | Secret used to sign JWT tokens (keep secret) |
+| `JWT_ALGORITHM` | No | JWT algorithm (default: `HS256`) |
+| `JWT_EXPIRE_MINUTES` | No | Token expiry in minutes (default: `1440`) |
+
+Security reminder: do not commit `.env` or secret values to git. Use Render's Environment settings or your host's secret manager.
+
+### Deployment notes — bcrypt / passlib compatibility
+
+If you see a 500 on `/api/auth/login` with a passlib / bcrypt stack trace, it's typically caused by an incompatible `bcrypt` version in the runtime. The repo includes a compatibility pin in `MigrationAgent.API/requirements.txt` (`passlib[bcrypt]==1.7.4` and `bcrypt==3.2.2`).
+
+When you change Python dependencies or modify `requirements.txt`, be sure to commit and push the change and then trigger a rebuild on Render so the correct `bcrypt` version is installed in the deployed container.
+
+Quick redeploy checklist:
+
+- Commit the `requirements.txt` change: `git add MigrationAgent.API/requirements.txt && git commit -m "Pin bcrypt for passlib compatibility"`
+- Push to your repo: `git push` (Render will auto-deploy if connected) or trigger a manual deploy in the Render dashboard.
+- Check the Render service logs for `pip install` output to confirm `bcrypt==3.2.2` was installed.
+
+
 ---
 
 ## What the Agent Cannot Do
