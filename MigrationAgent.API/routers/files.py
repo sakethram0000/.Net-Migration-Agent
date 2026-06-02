@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException
 from typing import List, Optional
 from pathlib import PurePosixPath
 import aiofiles
@@ -11,8 +11,6 @@ from pydantic import BaseModel
 import httpx
 import re
 import shutil
-from middleware.auth import require_user
-from database.models import User
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -20,10 +18,7 @@ BASE_DIR = Path(__file__).parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 
 @router.post("/upload")
-async def upload_files(
-    files: List[UploadFile] = File(...),
-    current_user: User = Depends(require_user)
-):
+async def upload_files(files: List[UploadFile] = File(...)):
     if UPLOAD_DIR.exists():
         shutil.rmtree(UPLOAD_DIR)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,9 +45,7 @@ async def upload_files(
     return {"success": True, "files": uploaded, "count": len(uploaded)}
 
 @router.get("/download")
-async def download_migrated_project(
-    current_user: User = Depends(require_user)
-):
+async def download_migrated_project():
     migrated_dir = BASE_DIR / "outputs" / "migrated"
     if not migrated_dir.exists() or not any(migrated_dir.rglob("*")):
         raise HTTPException(status_code=404, detail="No migrated project available — run migration first")
@@ -69,9 +62,7 @@ async def download_migrated_project(
     return FileResponse(zip_path, media_type='application/zip', filename='migrated_project.zip')
 
 @router.get("/list")
-async def list_uploaded_files(
-    current_user: User = Depends(require_user)
-):
+async def list_uploaded_files():
     files = []
     for file_path in UPLOAD_DIR.glob("*"):
         if file_path.is_file():
@@ -79,9 +70,7 @@ async def list_uploaded_files(
     return {"files": files}
 
 @router.delete("/clear")
-async def clear_uploads(
-    current_user: User = Depends(require_user)
-):
+async def clear_uploads():
     count = 0
     for file_path in UPLOAD_DIR.glob("*"):
         if file_path.is_file():
@@ -94,10 +83,7 @@ class GithubRequest(BaseModel):
     token: Optional[str] = None
 
 @router.post("/upload-github")
-async def upload_from_github(
-    request: GithubRequest,
-    current_user: User = Depends(require_user)
-):
+async def upload_from_github(request: GithubRequest):
     url = request.url.strip().rstrip("/")
     match = re.match(r"https?://github\.com/([^/]+)/([^/]+)", url)
     if not match:

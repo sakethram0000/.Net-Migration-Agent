@@ -4,11 +4,7 @@ import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const steps = ['Ingest', 'Analyze', 'Transform', 'Validate', 'Package'];
-let sessionToken = '';
 
-function getToken() {
-  return sessionToken;
-}
 
 function App() {
   const [fromVersion, setFromVersion] = useState('.NET Framework 4.8');
@@ -27,12 +23,6 @@ function App() {
   const [selectedOutput, setSelectedOutput] = useState(null);
   const [tokenStats, setTokenStats] = useState(null);
   const [ollamaStatus, setOllamaStatus] = useState(null);
-  const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState('login');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authError, setAuthError] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -167,75 +157,6 @@ function App() {
     setTerminal((prev) => `${prev === 'Terminal output will appear here when migration runs...' ? '' : `${prev}\n`}${line}`);
   }
 
-  // ── Auth helpers ──────────────────────────────────────────────────────
-
-  function logout() {
-    sessionToken = '';
-    setUser(null);
-  }
-
-  async function handleAuth(e) {
-    e.preventDefault();
-    setAuthError('');
-    setAuthBusy(true);
-    try {
-      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const data = await postJson(endpoint, { email: authEmail, password: authPassword });
-      sessionToken = data.token;
-      setUser(data.user);
-    } catch (err) {
-      setAuthError(err.message);
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  // ── Show login screen if not authenticated ────────────────────────────
-  if (!user) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}>
-        <div style={{ width: 380, background: '#fff', borderRadius: 12, padding: '36px 32px', boxShadow: '0 4px 24px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0' }}>
-          <div style={{ textAlign: 'center', marginBottom: 28 }}>
-            <div style={{ fontSize: 32, fontWeight: 900, color: '#1e293b', marginBottom: 4 }}>.N</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>.NET Migration Agent</div>
-            <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{authMode === 'login' ? 'Sign in to your account' : 'Create a new account'}</div>
-          </div>
-          <form onSubmit={handleAuth}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 6 }}>Email</label>
-              <input
-                type="email" required value={authEmail}
-                onChange={e => setAuthEmail(e.target.value)}
-                placeholder="you@example.com"
-                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 14, boxSizing: 'border-box', outline: 'none' }}
-              />
-            </div>
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 6 }}>Password</label>
-              <input
-                type="password" required value={authPassword}
-                onChange={e => setAuthPassword(e.target.value)}
-                placeholder="••••••••"
-                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 14, boxSizing: 'border-box', outline: 'none' }}
-              />
-            </div>
-            {authError && <div style={{ marginBottom: 14, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 7, fontSize: 13, color: '#dc2626' }}>{authError}</div>}
-            <button type="submit" disabled={authBusy}
-              style={{ width: '100%', padding: '11px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: authBusy ? 'not-allowed' : 'pointer', opacity: authBusy ? 0.7 : 1 }}>
-              {authBusy ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
-            </button>
-          </form>
-          <div style={{ textAlign: 'center', marginTop: 18, fontSize: 13, color: '#64748b' }}>
-            {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-            <span onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }}
-              style={{ color: '#3b82f6', fontWeight: 700, cursor: 'pointer' }}>
-              {authMode === 'login' ? 'Register' : 'Sign In'}
-            </span>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <>
@@ -254,11 +175,6 @@ function App() {
             <span className="hero-pill"><span className="pill-dot green"></span>.NET 8/9/10</span>
             <span className="hero-pill"><span className="pill-dot orange"></span>Build Validation</span>
             <OllamaStatus status={ollamaStatus} />
-            <span className="hero-pill" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
-              <span className="pill-dot" style={{ background: '#22c55e' }}></span>
-              {user?.email} ({user?.role})
-            </span>
-            <button onClick={logout} style={{ fontSize: 12, padding: '4px 12px', borderRadius: 20, border: '1px solid #e2e8f0', background: '#fff', cursor: 'pointer', fontWeight: 600, color: '#64748b' }}>Logout</button>
           </div>
         </div>
       </section>
@@ -711,30 +627,21 @@ function getStepState(index, stageIndex, job) {
 }
 
 async function postJson(url, payload) {
-  const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: JSON.stringify(payload) });
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || data.error || response.statusText);
   return data;
 }
 
 async function postForm(url, form) {
-  const token = getToken();
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers, body: form });
+  const response = await fetch(`${API_BASE}${url}`, { method: 'POST', body: form });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
   return data;
 }
 
 async function fetchJson(url, options = {}) {
-  const token = getToken();
-  const opts = { ...options };
-  if (token) opts.headers = { ...(opts.headers || {}), 'Authorization': `Bearer ${token}` };
-  const response = await fetch(`${API_BASE}${url}`, opts);
+  const response = await fetch(`${API_BASE}${url}`, options);
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
   return data;

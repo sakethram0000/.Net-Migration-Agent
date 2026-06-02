@@ -1,12 +1,10 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from agents.orchestrator import run_orchestrator
 from agents.analyzer import analyze
 from agents.validator import validate
 from agents.reporter import generate_report
 from agents.llm import reset_token_stats, get_token_stats
-from middleware.auth import require_user, require_admin
-from database.models import User
 import uuid
 import socket
 import subprocess
@@ -36,7 +34,7 @@ class MigrateRequest(BaseModel):
     from_version: str
     to_version: str
 
-def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str, user_id: str = "", user_email: str = "", user_role: str = "user"):
+def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str):
     try:
         migration_jobs[job_id]["status"] = "running"
         migration_jobs[job_id]["stage"] = "migrating"
@@ -87,9 +85,6 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
             from_version=from_version,
             to_version=to_version,
             progress_callback=update_progress,
-            user_id=user_id,
-            user_email=user_email,
-            user_role=user_role,
         )
 
         # ── Check if migrator failed ──────────────────────────────────────
@@ -129,10 +124,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         migration_jobs[job_id]["progress"] = f"Migration failed: {str(e)}"
 
 @router.post("/analyze")
-def run_analysis(
-    request: MigrationRequest,
-    current_user: User = Depends(require_user)
-):
+def run_analysis(request: MigrationRequest):
     return analyze(
         upload_dir=UPLOAD_DIR,
         from_version=request.from_version,
@@ -140,11 +132,7 @@ def run_analysis(
     )
 
 @router.post("/migrate")
-def run_migration(
-    request: MigrateRequest,
-    background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_user)
-):
+def run_migration(request: MigrateRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     migration_jobs[job_id] = {
         "status": "queued",
@@ -152,28 +140,18 @@ def run_migration(
         "step": 0,
         "progress": "Migration queued...",
         "created_at": time.time(),
-        "user_id": current_user.id,
-        "user_email": current_user.email,
-        "user_role": current_user.role,
     }
     background_tasks.add_task(
         run_migration_job, job_id, UPLOAD_DIR,
-        request.from_version, request.to_version,
-        current_user.id, current_user.email, current_user.role
+        request.from_version, request.to_version
     )
     return {"job_id": job_id, "status": "queued", "message": "Migration started in background"}
 
 @router.get("/status/{job_id}")
-def get_migration_status(
-    job_id: str,
-    current_user: User = Depends(require_user)
-):
+def get_migration_status(job_id: str):
     if job_id not in migration_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     job = migration_jobs[job_id]
-    # Users can only see their own jobs — admins can see all
-    if current_user.role != "admin" and job.get("user_id") != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied.")
     return {
         "job_id": job_id,
         "status": job["status"],
@@ -186,14 +164,11 @@ def get_migration_status(
     }
 
 @router.post("/validate")
-def run_validation(current_user: User = Depends(require_user)):
+def run_validation():
     return validate(output_dir=OUTPUT_DIR, progress_callback=None)
 
 @router.get("/token-stats/{job_id}")
-def get_token_stats_endpoint(
-    job_id: str,
-    current_user: User = Depends(require_user)
-):
+def get_token_stats_endpoint(job_id: str):
     if job_id not in migration_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     return migration_jobs[job_id].get("token_stats", {
@@ -202,7 +177,7 @@ def get_token_stats_endpoint(
     })
 
 @router.get("/report")
-def get_report(current_user: User = Depends(require_user)):
+def get_report():
     return generate_report()
 
 
