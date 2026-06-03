@@ -1,4 +1,5 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form
+from typing import Optional
 from pydantic import BaseModel
 from agents.orchestrator import run_orchestrator
 from agents.analyzer import analyze
@@ -132,8 +133,97 @@ def run_analysis(request: MigrationRequest):
     )
 
 @router.post("/migrate")
-def run_migration(request: MigrateRequest, background_tasks: BackgroundTasks):
+async def run_migration(
+    background_tasks: BackgroundTasks,
+    from_version: str = Form(...),
+    to_version: str = Form(...),
+    files: Optional[UploadFile] = File(None),
+    github_url: Optional[str] = Form(None),
+    github_token: Optional[str] = Form(None),
+):
     job_id = str(uuid.uuid4())
+
+    # ── Handle file upload internally ─────────────────────────────────────
+    upload_path = Path(UPLOAD_DIR)
+    if upload_path.exists():
+        shutil.rmtree(upload_path)
+    upload_path.mkdir(parents=True, exist_ok=True)
+
+    if files and files.filename:
+        content = await files.read()
+        if files.filename.endswith('.zip'):
+            import tempfile, zipfile
+            from pathlib import PurePosixPath
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
+                    for member in zip_ref.infolist():
+                        member_name = member.filename
+                        if member_name.startswith(('/', '\\')) or '..' in member_name:
+                            continue
+                        dest_path = upload_path / Path(*PurePosixPath(member_name).parts)
+                        if member.is_dir():
+                            dest_path.mkdir(parents=True, exist_ok=True)
+                            continue
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zip_ref.open(member) as source, open(dest_path, 'wb') as target:
+                            shutil.copyfileobj(source, target)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+        else:
+            file_path = upload_path / files.filename
+            file_path.write_bytes(content)
+
+    elif github_url and github_url.strip():
+        import httpx, re, tempfile, zipfile
+        from pathlib import PurePosixPath
+        url = github_url.strip().rstrip("/")
+        match = re.match(r"https?://github\.com/([^/]+)/([^/]+)", url)
+        if not match:
+            raise HTTPException(status_code=400, detail="Invalid GitHub URL")
+        owner, repo = match.group(1), match.group(2)
+        headers = {}
+        if github_token and github_token.strip():
+            headers['Authorization'] = f'token {github_token.strip()}'
+        zip_url = None
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
+            for branch in ["main", "master"]:
+                candidate = f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"
+                resp = await client.head(candidate, headers=headers)
+                if resp.status_code == 200:
+                    zip_url = candidate
+                    break
+            if not zip_url:
+                raise HTTPException(status_code=404, detail="Could not find main or master branch on GitHub")
+            resp = await client.get(zip_url, headers=headers)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Failed to download repository from GitHub")
+            zip_bytes = resp.content
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(zip_bytes)
+                tmp_path = tmp.name
+            with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
+                for member in zip_ref.infolist():
+                    member_name = member.filename
+                    if member_name.startswith(('/', '\\')) or '..' in member_name:
+                        continue
+                    dest_path = upload_path / Path(*PurePosixPath(member_name).parts)
+                    if member.is_dir():
+                        dest_path.mkdir(parents=True, exist_ok=True)
+                        continue
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    with zip_ref.open(member) as source, open(dest_path, 'wb') as target:
+                        shutil.copyfileobj(source, target)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
     migration_jobs[job_id] = {
         "status": "queued",
         "stage": "queued",
@@ -143,7 +233,7 @@ def run_migration(request: MigrateRequest, background_tasks: BackgroundTasks):
     }
     background_tasks.add_task(
         run_migration_job, job_id, UPLOAD_DIR,
-        request.from_version, request.to_version
+        from_version, to_version
     )
     return {"job_id": job_id, "status": "queued", "message": "Migration started in background"}
 
