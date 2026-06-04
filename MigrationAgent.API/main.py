@@ -1,5 +1,6 @@
 # Load .env FIRST before importing any modules that need environment variables
 import os
+import logging
 from pathlib import Path
 try:
     from dotenv import load_dotenv
@@ -14,6 +15,16 @@ from fastapi.responses import FileResponse
 from routers import files, ollama_router, migration
 from contextlib import asynccontextmanager
 import shutil
+
+# Fix 2 — Mute Uvicorn access logs for the polling endpoint
+# Suppresses stdout log writes for /api/migration/status/* requests
+# Eliminates 4 log writes/second from marketplace parallel workers
+class _SuppressStatusPolling(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "/api/migration/status/" not in msg
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressStatusPolling())
 
 BASE_DIR = Path(__file__).parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"

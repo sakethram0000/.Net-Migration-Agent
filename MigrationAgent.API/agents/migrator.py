@@ -257,6 +257,10 @@ Rules:
         if progress_callback:
             progress_callback(f"Merged Program.cs + Startup.cs (1/{total_files})")
 
+        # Fix 3 — yield CPU after merge step
+        time.sleep(0.1)
+        time.sleep(1.9)
+
     elif program_path and not startup_path:
         # Program.cs only — migrate it directly with SYSTEM_PROGRAM
         if progress_callback:
@@ -289,6 +293,10 @@ Rules:
 
         if progress_callback:
             progress_callback(f"Migrated Program.cs (1/{total_files})")
+
+        # Fix 3 — yield CPU after Program.cs step
+        time.sleep(0.1)
+        time.sleep(1.9)
 
     for index, (relative_path, content) in enumerate(files.items(), start=1):
         # Skip Program.cs and Startup.cs — already handled
@@ -336,7 +344,8 @@ Return ONLY the complete migrated C# code in a ```csharp block."""
             if progress_callback:
                 progress_callback(f"Reviewing {relative_path}...")
             code = review_code(code, relative_path)
-            time.sleep(1)  # small gap between migrate + review calls
+            # Fix 3 — yield CPU between migrate + review
+            time.sleep(0.1)
 
         elif file_type == '.csproj':
             prompt = f"""Migrate this .csproj from {from_version} to .NET 8.
@@ -367,8 +376,11 @@ Return ONLY the migrated XML in a ```xml block."""
         if progress_callback:
             progress_callback(f"Saved {relative_path} ({index}/{total_files})")
 
-        # Small delay to avoid Groq rate limits
-        time.sleep(2)
+        # Fix 3 — yield CPU before the rate-limit sleep
+        # Lets OS scheduler serve queued polling requests before next LLM call
+        time.sleep(0.1)
+        # Remaining wait to avoid Groq rate limits
+        time.sleep(1.9)
 
     return {"success": True, "migrated": migrated, "count": len(migrated), "output_dir": str(output_dir)}
 

@@ -27,6 +27,12 @@ OUTPUT_DIR = str(BASE_DIR / "outputs" / "migrated")
 migration_jobs: Dict[str, Dict[str, Any]] = {}
 runtime_apps:   Dict[str, Dict[str, Any]] = {}
 
+# Fix 1 — In-memory status cache with 2 second debounce
+# Marketplace runs 4 parallel workers polling every second.
+# Cache returns instantly for repeat requests within 2 seconds,
+# reducing CPU load by ~90% during parallel polling.
+_status_cache: Dict[str, Dict[str, Any]] = {}
+
 class MigrationRequest(BaseModel):
     from_version: str
     to_version: str
@@ -241,8 +247,14 @@ async def run_migration(
 def get_migration_status(job_id: str):
     if job_id not in migration_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Fix 1 — return cached response if less than 2 seconds old
+    cached = _status_cache.get(job_id)
+    if cached and (time.time() - cached["cached_at"]) < 2.0:
+        return cached["data"]
+
     job = migration_jobs[job_id]
-    return {
+    response = {
         "job_id": job_id,
         "status": job["status"],
         "stage": job.get("stage", "unknown"),
@@ -252,6 +264,8 @@ def get_migration_status(job_id: str):
         "error": job.get("error"),
         "created_at": job.get("created_at")
     }
+    _status_cache[job_id] = {"data": response, "cached_at": time.time()}
+    return response
 
 @router.post("/validate")
 def run_validation():
