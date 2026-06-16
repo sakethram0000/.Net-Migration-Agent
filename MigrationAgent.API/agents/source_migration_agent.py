@@ -439,9 +439,24 @@ def read_packages_config(csproj_path: str, upload_dir: str) -> str:
     """
     For any .csproj, look for a packages.config in the same folder.
     Parse all <package> entries and return them as a hint string for the LLM prompt.
+    Filters out frontend JS packages, old bundling infrastructure, and legacy
+    ASP.NET Framework packages that have no place in a .NET 8 project.
     Generic — works for any .NET Framework project with a packages.config.
     Returns empty string if no packages.config found.
     """
+    # Packages that must never be carried over to .NET 8
+    # Category 1: Frontend JS libraries — already copied to wwwroot/ as physical files
+    # Category 2: Old bundling infrastructure — BundleConfig is removed, not needed
+    # Category 3: Old ASP.NET Framework packages — replaced by built-in ASP.NET Core
+    BLOCKED_PREFIXES = {
+        "jquery", "bootstrap", "modernizr", "respond",
+        "microsoft.jquery", "antlr", "webgrease",
+        "microsoft.aspnet.web.optimization",
+        "microsoft.aspnet.mvc", "microsoft.aspnet.razor",
+        "microsoft.aspnet.webpages", "microsoft.web.infrastructure",
+        "microsoft.aspnet.identity", "microsoft.owin", "owin",
+    }
+
     csproj_folder = Path(upload_dir) / Path(csproj_path).parent
     packages_config = csproj_folder / "packages.config"
     if not packages_config.exists():
@@ -451,7 +466,14 @@ def read_packages_config(csproj_path: str, upload_dir: str) -> str:
         packages = re.findall(r'<package\s+id="([^"]+)"\s+version="([^"]+)"', content)
         if not packages:
             return ""
-        lines = [f"  - {pkg_id} {version}" for pkg_id, version in packages]
+        # Filter out blocked packages
+        filtered = [
+            (pkg_id, version) for pkg_id, version in packages
+            if not any(pkg_id.lower().startswith(prefix) for prefix in BLOCKED_PREFIXES)
+        ]
+        if not filtered:
+            return ""
+        lines = [f"  - {pkg_id} {version}" for pkg_id, version in filtered]
         return "\nPackages from packages.config (carry relevant ones over as PackageReference):\n" + "\n".join(lines)
     except Exception:
         return ""
