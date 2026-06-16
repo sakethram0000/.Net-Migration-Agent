@@ -8,15 +8,15 @@ Phase 2: Goal-driven loop (build → decide → llm_fix → retry) until goal ac
 """
 from agents.context import MigrationContext, OrchestratorDecision
 from agents.analyzer import AnalyzerAgent
-from agents.migrator import MigratorAgent
+from agents.source_migration_agent import MigratorAgent
 from agents.auth_agent import AuthAgentWrapper
 from agents.view_migrator import ViewMigratorAgent
 from agents.webforms_migrator import WebFormsMigratorAgent
 from agents.blazor_migrator import BlazorMigratorAgent
-from agents.fixer import FixerAgentWrapper
+from agents.post_migration_fix_agent import FixerAgentWrapper
 from agents.guardrail_agent import GuardrailAgentWrapper
 from agents.build_validator import BuildValidatorAgentWrapper
-from agents.llm_fixer_agent import LLMFixerAgent
+from agents.build_error_ai_agent import BuildErrorAIAgent
 from agents.reporter import store_context, ReporterAgent
 
 
@@ -35,7 +35,7 @@ class MigrationOrchestrator:
     def __init__(self):
         # Phase 2 agents — used in goal-driven build-fix loop
         self.build_validator = BuildValidatorAgentWrapper()
-        self.llm_fixer       = LLMFixerAgent()
+        self.llm_fixer       = BuildErrorAIAgent()
         self.fixer           = FixerAgentWrapper()
 
     def run(self, context: MigrationContext) -> MigrationContext:

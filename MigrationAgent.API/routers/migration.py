@@ -54,7 +54,7 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
             msg_lower = message.lower()
             if "analyzer" in msg_lower:
                 migration_jobs[job_id]["stage"] = "analyzing"
-            elif "llm migration" in msg_lower or "migrating" in msg_lower:
+            elif "source migration agent" in msg_lower or "migrating" in msg_lower:
                 migration_jobs[job_id]["stage"] = "migrating"
             elif "auth agent" in msg_lower:
                 migration_jobs[job_id]["stage"] = "auth"
@@ -64,13 +64,13 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
                 migration_jobs[job_id]["stage"] = "webforms"
             elif "blazor" in msg_lower:
                 migration_jobs[job_id]["stage"] = "blazor"
-            elif "fix agent" in msg_lower:
+            elif "post-migration fix agent" in msg_lower:
                 migration_jobs[job_id]["stage"] = "fixing"
             elif "guardrail" in msg_lower:
                 migration_jobs[job_id]["stage"] = "guardrails"
             elif "build validator" in msg_lower:
                 migration_jobs[job_id]["stage"] = "build_validate"
-            elif "llm fixer" in msg_lower:
+            elif "build error ai agent" in msg_lower:
                 migration_jobs[job_id]["stage"] = "llm_fixing"
             elif "goal achieved" in msg_lower:
                 migration_jobs[job_id]["stage"] = "completed"
@@ -126,6 +126,8 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
         )
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         migration_jobs[job_id]["status"] = "failed"
         migration_jobs[job_id]["error"] = str(e)
         migration_jobs[job_id]["progress"] = f"Migration failed: {str(e)}"
@@ -151,11 +153,13 @@ async def run_migration(
 
     # ── Handle file upload internally ─────────────────────────────────────
     upload_path = Path(UPLOAD_DIR)
-    if upload_path.exists():
-        shutil.rmtree(upload_path)
     upload_path.mkdir(parents=True, exist_ok=True)
 
     if files and files.filename:
+        # New file coming in — clear old uploads and extract fresh
+        if upload_path.exists():
+            shutil.rmtree(upload_path)
+        upload_path.mkdir(parents=True, exist_ok=True)
         content = await files.read()
         if files.filename.endswith('.zip'):
             import tempfile, zipfile

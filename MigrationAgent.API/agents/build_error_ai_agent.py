@@ -1,5 +1,5 @@
 """
-LLM Fixer Agent — the missing piece in the pipeline.
+Build Error AI Agent — the missing piece in the pipeline.
 Takes structured build errors from BuildValidatorAgent,
 reads the specific broken .cs files, sends them to the LLM
 with the exact error context, and rewrites only those files.
@@ -68,7 +68,7 @@ def _group_errors_by_file(build_errors: list) -> dict:
     return grouped
 
 
-class LLMFixerAgent(BaseAgent):
+class BuildErrorAIAgent(BaseAgent):
     """
     LLM-powered build error fixer.
 
@@ -78,7 +78,7 @@ class LLMFixerAgent(BaseAgent):
     Observes: reports which files were fixed, which could not be fixed
     """
 
-    name = "LLM Fixer Agent"
+    name = "Build Error AI Agent"
     goal = "fix C# files causing build errors using LLM with exact error context"
 
     def perceive(self, context: MigrationContext) -> dict:
@@ -130,7 +130,7 @@ class LLMFixerAgent(BaseAgent):
             error_summary = "\n".join(error_lines)
 
             context.progress(
-                f"LLM Fixer Agent: fixing {actual_file.name} "
+                f"Build Error AI Agent: fixing {actual_file.name} "
                 f"({len(errors)} error(s) on attempt {context.attempts + 1})..."
             )
 
@@ -150,7 +150,7 @@ Fix ONLY the errors listed above. Return the complete fixed file."""
 
             try:
                 response = ask_with_system(
-                    SYSTEM_LLM_FIXER, prompt, agent_name="LLM Fixer Agent"
+                    SYSTEM_LLM_FIXER, prompt, agent_name="Build Error AI Agent"
                 )
                 fixed_content = _extract_code(response)
 
@@ -159,7 +159,7 @@ Fix ONLY the errors listed above. Return the complete fixed file."""
                     files_fixed.append(actual_file.name)
                     total_errors_addressed += len(errors)
                     context.progress(
-                        f"LLM Fixer Agent: fixed {actual_file.name} — "
+                        f"Build Error AI Agent: fixed {actual_file.name} — "
                         f"{len(errors)} error(s) addressed"
                     )
                 else:
@@ -194,7 +194,7 @@ Fix ONLY the errors listed above. Return the complete fixed file."""
         return AgentObservation(
             agent=self.name,
             status="completed" if success else "failed",
-            summary=result.get("summary", "LLM Fixer completed."),
+            summary=result.get("summary", "Build Error AI Agent completed."),
             actionable=True,
             recommended_next="build_validator",   # always retry build after fixing
             data=result,

@@ -26,7 +26,7 @@ function App() {
   const inputRef = useRef(null);
 
   useEffect(() => {
-    fetchJson('/api/ollama/status')
+    fetchJson('/api/llm/status')
       .then((data) => setOllamaStatus(data))
       .catch(() => setOllamaStatus({ connected: false, status: 'unreachable' }));
   }, []);
@@ -97,10 +97,10 @@ function App() {
     setReport(null);
     setSelectedOutput(null);
     try {
-      const data = await postJson('/api/migration/migrate', {
-        from_version: fromVersion,
-        to_version: toVersion,
-      });
+      const form = new FormData();
+      form.append('from_version', fromVersion);
+      form.append('to_version', toVersion);
+      const data = await postForm('/api/migration/migrate', form);
       log(`Migration job queued: ${data.job_id}`);
       poll(data.job_id);
     } catch (err) {
@@ -111,7 +111,7 @@ function App() {
 
   async function poll(jobId) {
     let lastProgress = '';
-    for (let i = 0; i < 720; i += 1) {
+    for (let i = 0; i < 7200; i += 1) {
       const data = await fetchJson(`/api/migration/status/${jobId}`);
       setJob(data);
       const msg = `${data.stage}: ${data.progress}`;
@@ -413,15 +413,15 @@ function Findings({ inventory, report }) {
 function Actions({ job }) {
   const agents = [
     { name: 'Analyzer Agent',       role: 'Scan projects, packages — orchestrator plans from this', stages: ['analyzing'] },
-    { name: 'LLM Migration Agent',  role: 'Rewrite source files to target .NET version',            stages: ['migrating'] },
+    { name: 'Source Migration Agent',  role: 'Rewrite source files to target .NET version',            stages: ['migrating'] },
     { name: 'Auth Agent',           role: 'Detect, migrate and verify authentication',               stages: ['auth'] },
     { name: 'View Migration Agent', role: 'Migrate Razor views — HTML Helpers to Tag Helpers',      stages: ['views'] },
     { name: 'Web Forms Agent',      role: 'Convert .aspx/.ascx/.master to Razor Pages',             stages: ['webforms'] },
     { name: 'Blazor Agent',         role: 'Migrate .razor components to .NET 8',                    stages: ['blazor'] },
-    { name: 'Fix Agent',            role: 'Apply deterministic structural fixes',                   stages: ['fixing'] },
+    { name: 'Post-Migration Fix Agent', role: 'Apply deterministic structural fixes',                stages: ['fixing'] },
     { name: 'Guardrail Agent',      role: 'Scan architecture and code quality violations',          stages: ['guardrails'] },
     { name: 'Build Validator',      role: 'Pre-clean, build and auto-fix',                         stages: ['build_validate'] },
-    { name: 'LLM Fixer Agent',      role: 'Fix broken files using exact build error context',       stages: ['llm_fixing'] },
+    { name: 'Build Error AI Agent',  role: 'Fix broken files using exact build error context',      stages: ['llm_fixing'] },
     { name: 'Reporter Agent',       role: 'Generate full report from context — no re-running',     stages: ['completed'] },
   ];
 

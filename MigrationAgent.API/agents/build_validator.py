@@ -255,6 +255,36 @@ def _auto_fix(csproj: Path, combined_output: str, progress_callback=None) -> lis
         except Exception:
             pass
 
+    # NETSDK1022 — duplicate compile/content items (explicit entries conflict with SDK implicit includes)
+    if "NETSDK1022" in combined_output:
+        try:
+            content = csproj.read_text(encoding="utf-8", errors="ignore")
+            cleaned = re.sub(r'\s*<Compile Include="[^"]+"\s*/>\s*\n?', '', content)
+            cleaned = re.sub(r'\s*<Compile Include="[^"]+"[^>]*>.*?</Compile>\s*\n?', '', cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r'\s*<None Include="[^"]+"\s*/>\s*\n?', '', cleaned)
+            cleaned = re.sub(r'<ItemGroup>\s*</ItemGroup>\s*\n?', '', cleaned)
+            if cleaned != content:
+                csproj.write_text(cleaned, encoding="utf-8")
+                fixes.append("Auto-fixed: Removed duplicate explicit compile items (NETSDK1022)")
+                progress("Build Validator: Removed duplicate compile items (NETSDK1022)")
+        except Exception:
+            pass
+
+    # NETSDK1138 — old target framework moniker still present
+    if "NETSDK1138" in combined_output:
+        try:
+            content = csproj.read_text(encoding="utf-8", errors="ignore")
+            # Remove old monikers like net45, net472, net48 alongside new ones
+            cleaned = re.sub(
+                r'<TargetFrameworks?>net[1-4][^<]*</TargetFrameworks?>', '', content
+            )
+            if cleaned != content:
+                csproj.write_text(cleaned, encoding="utf-8")
+                fixes.append("Auto-fixed: Removed old target framework moniker (NETSDK1138)")
+                progress("Build Validator: Removed old target framework moniker")
+        except Exception:
+            pass
+
     return fixes
 
 

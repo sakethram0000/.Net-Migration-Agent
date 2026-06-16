@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from routers import files, ollama_router, migration
+from routers import files, llm_router, migration
 from contextlib import asynccontextmanager
 import shutil
 
@@ -51,7 +51,7 @@ app.add_middleware(
 )
 
 app.include_router(files.router)
-app.include_router(ollama_router.router)
+app.include_router(llm_router.router)
 app.include_router(migration.router)
 
 @app.get("/health")

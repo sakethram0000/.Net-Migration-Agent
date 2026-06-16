@@ -1,10 +1,10 @@
 from fastapi import APIRouter
 from agents.llm import check_connection, ask
 
-router = APIRouter(prefix="/api/ollama", tags=["ollama"])
+router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 @router.get("/status")
-def ollama_status():
+def llm_status():
     connected = check_connection()
     return {
         "connected": connected,
@@ -13,7 +13,7 @@ def ollama_status():
     }
 
 @router.get("/test")
-def ollama_test():
+def llm_test():
     try:
         response = ask("Say hello in one sentence.")
         return {"success": True, "response": response}

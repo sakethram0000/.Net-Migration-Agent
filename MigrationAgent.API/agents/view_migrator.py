@@ -15,6 +15,32 @@ SKIP_FOLDERS = {"obj", "bin", ".vs", ".git", "node_modules"}
 def _replace_html_helpers(content: str) -> str:
     """Apply all known deterministic HTML Helper → Tag Helper replacements."""
 
+    # GAP 5 fix: Replace @Styles.Render and @Scripts.Render with direct tags
+    # Common bundle → actual file mappings
+    styles_map = {
+        '~/Content/css':    '<link rel="stylesheet" href="~/Content/bootstrap.min.css" />\n    <link rel="stylesheet" href="~/Content/Site.css" />',
+        '~/Content/css"':   '<link rel="stylesheet" href="~/Content/bootstrap.min.css" />\n    <link rel="stylesheet" href="~/Content/Site.css" />',
+    }
+    scripts_map = {
+        '~/bundles/modernizr':  '<script src="~/Scripts/modernizr-2.6.2.js"></script>',
+        '~/bundles/jquery':     '<script src="~/Scripts/jquery-1.10.2.min.js"></script>',
+        '~/bundles/bootstrap':  '<script src="~/Scripts/bootstrap.min.js"></script>',
+        '~/bundles/jqueryval':  '<script src="~/Scripts/jquery.validate.min.js"></script>\n    <script src="~/Scripts/jquery.validate.unobtrusive.min.js"></script>',
+    }
+
+    def replace_styles(m):
+        bundle = m.group(1).strip().rstrip('"').rstrip("'")
+        return styles_map.get(bundle, styles_map.get(bundle + '"',
+            f'<link rel="stylesheet" href="~/Content/site.css" />'))
+
+    def replace_scripts(m):
+        bundle = m.group(1).strip().rstrip('"').rstrip("'")
+        return scripts_map.get(bundle,
+            f'<script src="~/Scripts/site.js"></script>')
+
+    content = re.sub(r'@Styles\.Render\s*\(\s*"([^"]+)"\s*\)', replace_styles, content)
+    content = re.sub(r'@Scripts\.Render\s*\(\s*"([^"]+)"\s*\)', replace_scripts, content)
+
     # @Html.TextBoxFor(m => m.X) → <input asp-for="X">
     content = re.sub(
         r'@Html\.TextBoxFor\s*\(\s*\w+\s*=>\s*\w+\.(\w+)(?:,\s*new\s*\{[^}]*\})?\s*\)',
@@ -148,6 +174,20 @@ def _replace_html_helpers(content: str) -> str:
         content
     )
 
+    # Ensure bare C# control flow keywords have @ prefix — Razor syntax rule
+    # Covers if/foreach/for/while/switch that lost their @ during copy or LLM pass
+    # Generic — applies to any .cshtml file in any project
+    for keyword in ('if', 'foreach', 'for', 'while', 'switch'):
+        content = re.sub(
+            rf'(?m)^([ \t]*)(?<!@)\b({keyword})\s*\(',
+            rf'\1@{keyword}(',
+            content
+        )
+
+    # Remove stray markdown language identifiers left on the first line
+    # e.g. if LLM response leaks "csharp" or "cshtml" as a bare word
+    content = re.sub(r'^(csharp|cshtml|razor|html|xml)\s*\n', '', content, flags=re.IGNORECASE)
+
     return content
 
 
@@ -196,8 +236,71 @@ def _needs_llm_pass(content: str) -> bool:
     return bool(re.search(r'@Html\.', content))
 
 
+def _deduplicate_sections(content: str) -> str:
+    """
+    Remove duplicate @section blocks from a Razor view.
+    If the same section name appears more than once, keep only the last one
+    which is always the real preserved block — remove any empty LLM placeholders.
+    Generic — works for any section name in any .cshtml file.
+    """
+    section_pattern = re.compile(
+        r'@section\s+(\w+)\s*\{', re.IGNORECASE
+    )
+    matches = list(section_pattern.finditer(content))
+    if len(matches) <= 1:
+        return content
+
+    # Group match positions by section name
+    by_name = {}
+    for m in matches:
+        name = m.group(1).lower()
+        by_name.setdefault(name, []).append(m)
+
+    # For each section with duplicates, find full block extents and remove all but last
+    ranges_to_remove = []
+    for name, occurrences in by_name.items():
+        if len(occurrences) < 2:
+            continue
+        # Remove all but the last occurrence
+        for m in occurrences[:-1]:
+            # Walk forward to find the matching closing brace
+            start = m.start()
+            depth = 0
+            pos = m.end() - 1  # position of opening {
+            for i in range(pos, len(content)):
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        # Include trailing newline if present
+                        if end < len(content) and content[end] == '\n':
+                            end += 1
+                        ranges_to_remove.append((start, end))
+                        break
+
+    if not ranges_to_remove:
+        return content
+
+    # Remove ranges from end to start so positions stay valid
+    ranges_to_remove.sort(key=lambda x: x[0], reverse=True)
+    for start, end in ranges_to_remove:
+        content = content[:start] + content[end:]
+
+    return content
+
+
 def _llm_migrate_view(path: str, content: str, from_version: str, to_version: str) -> str:
     """Send complex view to LLM for targeted rewrite."""
+    # Extract and preserve @section scripts block before LLM pass
+    # so the LLM never sees it and cannot duplicate or corrupt it
+    scripts_block = ''
+    scripts_match = re.search(r'(@section\s+scripts\s*\{.*?\}\s*)$', content, re.DOTALL | re.IGNORECASE)
+    if scripts_match:
+        scripts_block = scripts_match.group(1)
+        content = content[:scripts_match.start()].rstrip()
+
     try:
         from agents.llm import ask_with_system
         system = """You are a .NET 8 Razor view migration expert.
@@ -207,6 +310,8 @@ Rules:
 - Keep all HTML structure, CSS classes, and layout intact
 - Keep all @model, @using, @inject directives
 - Keep all C# logic blocks (@foreach, @if, etc.)
+- Do NOT generate any @section scripts block — it is handled separately and will be added back automatically
+- NEVER remove <script> tags or JavaScript code outside of section blocks
 - Return ONLY the migrated .cshtml content. Nothing else."""
 
         prompt = f"""Migrate this Razor view from {from_version} to .NET 8 Tag Helpers.
@@ -214,15 +319,24 @@ File: {path}
 
 {content[:6000]}
 
+IMPORTANT: Do NOT include any @section scripts block in your response — it will be appended automatically.
 Return ONLY the migrated .cshtml content."""
 
         result = ask_with_system(system, prompt, agent_name="View Migration Agent")
-        # Strip any markdown code fences if LLM wraps in them
         result = re.sub(r'^```(?:cshtml|html|razor)?\s*', '', result, flags=re.MULTILINE)
         result = re.sub(r'\s*```$', '', result, flags=re.MULTILINE)
-        return result.strip()
+        result = result.strip()
     except Exception:
-        return content  # if LLM fails, keep deterministic result
+        result = content
+
+    # Restore preserved scripts block
+    if scripts_block:
+        result = result.rstrip() + '\n\n' + scripts_block
+
+    # Approach 3 safety net — deduplicate any @section blocks the LLM still emitted
+    result = _deduplicate_sections(result)
+
+    return result
 
 
 # ── Main entry point ──────────────────────────────────────────────────────
