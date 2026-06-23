@@ -52,6 +52,13 @@ class MigrationContext:
     upload_dir: str
     output_dir: str
 
+    # ── Stack profile (optional — None means backend-only migration) ───────
+    # source_frontend: detected frontend framework in uploaded project
+    # target_frontend: desired frontend framework in migrated output
+    # Both default to None — when None, pipeline runs exactly as before
+    source_frontend: Optional[str] = None   # e.g. "angularjs", "jquery", "react", "vue"
+    target_frontend: Optional[str] = None   # e.g. "react", "angular", "vue", "blazor"
+
     # ── User info (set from JWT token) ─────────────────────────────────
     user_id: str = ""
     user_email: str = ""

@@ -339,12 +339,299 @@ Return ONLY the migrated .cshtml content."""
     return result
 
 
+def _migrate_angularjs_to_react(js_file: Path, content: str, progress_callback=None) -> str:
+    """
+    Convert a single AngularJS .js file to a React functional component (.jsx).
+    Uses LLM with a targeted prompt. Same logic, same look — different framework.
+    Generic — works for any AngularJS controller/service/directive file.
+    """
+    try:
+        from agents.llm import ask_with_system
+        system = """You are a frontend migration expert converting AngularJS 1.x to React 18 with hooks.
+Rules:
+- Convert AngularJS controllers to React functional components with useState/useEffect
+- Convert $scope.X = ... to const [x, setX] = useState(...)
+- Convert $http.get/post to fetch() or axios calls inside useEffect or handler functions
+- Convert ng-repeat to .map() in JSX
+- Convert ng-model to controlled inputs with value + onChange
+- Convert ng-if/ng-show to conditional rendering in JSX
+- Convert ng-click to onClick handlers
+- Convert AngularJS services ($http, $scope, $routeParams) to React hooks or props
+- Keep ALL business logic and API endpoint URLs exactly as-is
+- Keep the same CSS class names — same look and feel
+- Export the component as default export
+- Return ONLY the complete .jsx file content inside a ```jsx block. Nothing else."""
+
+        prompt = f"""Convert this AngularJS file to a React functional component.
+File: {js_file.name}
+
+{content[:6000]}
+
+Keep all business logic and API calls identical. Same CSS classes. Return ONLY the .jsx content."""
+
+        from agents.llm import ask_with_system
+        result = ask_with_system(system, prompt, agent_name="View Migration Agent")
+        result = re.sub(r'^```(?:jsx|js|javascript)?\s*', '', result, flags=re.MULTILINE)
+        result = re.sub(r'\s*```$', '', result, flags=re.MULTILINE)
+        return result.strip()
+    except Exception:
+        return content
+
+
+def _generate_react_scaffold(output_dir: Path, converted_files: list) -> list:
+    """
+    Generate the minimal React project scaffold needed to run the converted .jsx files.
+    Creates: package.json, vite.config.js, index.html, src/App.jsx, src/main.jsx
+    Generic — derives project name from output folder, imports all converted components.
+    Only runs when AngularJS → React conversion has produced .jsx files.
+    """
+    changes = []
+    if not converted_files:
+        return changes
+
+    # Place scaffold in a ClientApp/ folder inside the web project root
+    # Find the web project root — folder containing a .csproj with Sdk.Web
+    web_root = None
+    for csproj in output_dir.rglob("*.csproj"):
+        if any(p.lower() in SKIP_FOLDERS for p in csproj.parts):
+            continue
+        try:
+            if "Microsoft.NET.Sdk.Web" in csproj.read_text(encoding="utf-8", errors="ignore"):
+                web_root = csproj.parent
+                break
+        except Exception:
+            pass
+
+    if not web_root:
+        web_root = output_dir
+
+    client_dir = web_root / "ClientApp"
+    src_dir    = client_dir / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+
+    project_name = web_root.name.lower().replace(" ", "-") or "react-app"
+
+    # Collect converted component names for App.jsx imports
+    component_imports = []
+    component_uses    = []
+    for js_file in converted_files:
+        jsx_path = js_file.with_suffix(".jsx")
+        if not jsx_path.exists():
+            continue
+        # Derive relative path from src/ to the .jsx file
+        try:
+            rel = jsx_path.relative_to(web_root)
+            component_name = jsx_path.stem.replace("-", "_").replace(".", "_")
+            # Capitalise first letter for component name convention
+            component_name = component_name[0].upper() + component_name[1:]
+            import_path = "../" + str(rel).replace("\\", "/")
+            component_imports.append(f"import {component_name} from '{import_path}';")
+            component_uses.append(f"      <{component_name} />")
+        except Exception:
+            pass
+
+    imports_str = "\n".join(component_imports)
+    uses_str    = "\n".join(component_uses) or "      {/* Add your components here */}"
+
+    # package.json
+    pkg_json = client_dir / "package.json"
+    if not pkg_json.exists():
+        pkg_json.write_text(
+            '{\n'
+            f'  "name": "{project_name}-client",\n'
+            '  "version": "1.0.0",\n'
+            '  "private": true,\n'
+            '  "scripts": {\n'
+            '    "dev": "vite",\n'
+            '    "build": "vite build",\n'
+            '    "preview": "vite preview"\n'
+            '  },\n'
+            '  "dependencies": {\n'
+            '    "react": "^18.2.0",\n'
+            '    "react-dom": "^18.2.0",\n'
+            '    "react-router-dom": "^6.22.0",\n'
+            '    "axios": "^1.6.0"\n'
+            '  },\n'
+            '  "devDependencies": {\n'
+            '    "@vitejs/plugin-react": "^4.2.0",\n'
+            '    "vite": "^5.1.0"\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8"
+        )
+        changes.append("Generated ClientApp/package.json — React 18 + Vite + axios")
+
+    # vite.config.js
+    vite_config = client_dir / "vite.config.js"
+    if not vite_config.exists():
+        vite_config.write_text(
+            "import { defineConfig } from 'vite';\n"
+            "import react from '@vitejs/plugin-react';\n\n"
+            "export default defineConfig({\n"
+            "  plugins: [react()],\n"
+            "  server: {\n"
+            "    proxy: {\n"
+            "      '/api': 'https://localhost:7001',\n"
+            "      '/menu': 'https://localhost:7001',\n"
+            "      '/account': 'https://localhost:7001',\n"
+            "    }\n"
+            "  }\n"
+            "});\n",
+            encoding="utf-8"
+        )
+        changes.append("Generated ClientApp/vite.config.js — proxy to .NET 8 backend on localhost:7001")
+
+    # index.html
+    index_html = client_dir / "index.html"
+    if not index_html.exists():
+        index_html.write_text(
+            "<!DOCTYPE html>\n"
+            "<html lang=\"en\">\n"
+            "  <head>\n"
+            "    <meta charset=\"UTF-8\" />\n"
+            "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+            f"    <title>{project_name}</title>\n"
+            "  </head>\n"
+            "  <body>\n"
+            "    <div id=\"root\"></div>\n"
+            "    <script type=\"module\" src=\"/src/main.jsx\"></script>\n"
+            "  </body>\n"
+            "</html>\n",
+            encoding="utf-8"
+        )
+        changes.append("Generated ClientApp/index.html")
+
+    # src/main.jsx
+    main_jsx = src_dir / "main.jsx"
+    if not main_jsx.exists():
+        main_jsx.write_text(
+            "import React from 'react';\n"
+            "import { createRoot } from 'react-dom/client';\n"
+            "import App from './App';\n\n"
+            "createRoot(document.getElementById('root')).render(<App />);\n",
+            encoding="utf-8"
+        )
+        changes.append("Generated ClientApp/src/main.jsx")
+
+    # src/App.jsx — imports all converted components
+    app_jsx = src_dir / "App.jsx"
+    if not app_jsx.exists():
+        app_jsx.write_text(
+            "import React from 'react';\n"
+            f"{imports_str}\n\n"
+            "export default function App() {\n"
+            "  return (\n"
+            "    <div>\n"
+            f"{uses_str}\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+            encoding="utf-8"
+        )
+        changes.append(f"Generated ClientApp/src/App.jsx — imports {len(component_imports)} converted component(s)")
+
+    # README instructions
+    readme = client_dir / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            "# React Frontend (Migrated from AngularJS)\n\n"
+            "## Setup\n"
+            "```bash\n"
+            "cd ClientApp\n"
+            "npm install\n"
+            "npm run dev\n"
+            "```\n\n"
+            "## Notes\n"
+            "- Backend runs on `https://localhost:7001` — start the .NET project first\n"
+            "- API calls are proxied from Vite dev server to the backend automatically\n"
+            "- Run `npm run build` to produce a production build\n",
+            encoding="utf-8"
+        )
+        changes.append("Generated ClientApp/README.md with setup instructions")
+
+    return changes
+
+
+def _run_angularjs_to_react(
+    output_dir: Path,
+    from_version: str,
+    to_version: str,
+    progress_callback=None
+) -> dict:
+    """
+    Find all AngularJS .js files in the output and convert them to React .jsx components.
+    Detects AngularJS by presence of angular.module / $scope / ng-controller patterns.
+    Writes .jsx files alongside originals. Returns migration summary.
+    """
+    def progress(msg):
+        if progress_callback:
+            progress_callback(msg)
+
+    # Find candidate JS files — skip all vendor/lib/locale folders and files
+    # Only convert actual app code — never vendor libraries or i18n locale files
+    VENDOR_FOLDER_NAMES = {"ext", "lib", "vendor", "node_modules", "bower_components"}
+    VENDOR_FILE_PREFIXES = (
+        "jquery", "bootstrap", "angular.", "angular-",
+        "modernizr", "respond", "restangular", "knockout",
+        "require", "underscore", "lodash",
+    )
+
+    js_files = [
+        f for f in output_dir.rglob("*.js")
+        if not any(p.lower() in SKIP_FOLDERS for p in f.parts)
+        # Skip any file inside a vendor folder (ext/, lib/, vendor/ etc.)
+        and not any(p.lower() in VENDOR_FOLDER_NAMES for p in f.parts)
+        # Skip vendor/library files by name prefix
+        and not any(f.name.lower().startswith(prefix) for prefix in VENDOR_FILE_PREFIXES)
+        # Skip minified files
+        and ".min." not in f.name.lower()
+    ]
+
+    angular_files = []
+    for js_file in js_files:
+        try:
+            text = js_file.read_text(encoding="utf-8", errors="ignore")[:3000]
+            if any(p in text for p in ["angular.module", "$scope", "$http", ".controller(", ".service(", ".factory("]):
+                angular_files.append(js_file)
+        except Exception:
+            pass
+
+    if not angular_files:
+        return {"skipped": True, "reason": "No AngularJS files detected", "files_converted": 0, "changes": []}
+
+    progress(f"View Migration Agent: Found {len(angular_files)} AngularJS file(s) — converting to React...")
+
+    changes = []
+    for js_file in angular_files:
+        try:
+            content = js_file.read_text(encoding="utf-8", errors="ignore")
+            progress(f"View Migration Agent: Converting {js_file.name} to React...")
+            jsx_content = _migrate_angularjs_to_react(js_file, content, progress_callback)
+            jsx_path = js_file.with_suffix(".jsx")
+            jsx_path.write_text(jsx_content, encoding="utf-8")
+            changes.append(f"Converted {js_file.name} → {jsx_path.name}")
+            import time
+            time.sleep(2)  # rate limit gap between LLM calls
+        except Exception as e:
+            changes.append(f"Failed to convert {js_file.name}: {str(e)}")
+
+    progress(f"View Migration Agent: Converted {len(changes)} AngularJS file(s) to React.")
+
+    # Generate React project scaffold so the converted .jsx files are actually runnable
+    scaffold_changes = _generate_react_scaffold(output_dir, angular_files)
+    changes.extend(scaffold_changes)
+
+    return {"skipped": False, "files_converted": len(angular_files), "changes": changes}
+
+
 # ── Main entry point ──────────────────────────────────────────────────────
 
 def run_view_migrator(
     output_dir: str,
     from_version: str,
     to_version: str,
+    source_frontend: str = None,
+    target_frontend: str = None,
     progress_callback: Optional[Callable[[str], None]] = None
 ) -> dict:
     """
@@ -424,6 +711,11 @@ def run_view_migrator(
 
     progress(f"View Migration Agent: {len(changes)} view(s) migrated, {total_helpers_replaced} helper(s) replaced.")
 
+    # Step 6 — AngularJS → React conversion (only when profile says so)
+    frontend_result = {}
+    if source_frontend == "angularjs" and target_frontend == "react":
+        frontend_result = _run_angularjs_to_react(out, from_version, to_version, progress_callback)
+
     return {
         "skipped": False,
         "reason": "",
@@ -433,6 +725,7 @@ def run_view_migrator(
         "manual_review": manual_review,
         "viewimports_fixed": viewimports_fixes,
         "changes": changes,
+        "frontend_conversion": frontend_result,
     }
 
 
@@ -449,6 +742,8 @@ class ViewMigratorAgent(BaseAgent):
             output_dir=context.output_dir,
             from_version=context.from_version,
             to_version=context.to_version,
+            source_frontend=context.source_frontend,
+            target_frontend=context.target_frontend,
             progress_callback=context.progress_callback,
         )
 

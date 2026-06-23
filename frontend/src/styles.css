@@ -208,8 +208,25 @@ a:focus-visible {
 .version-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: end;
+  align-items: start;
   gap: 16px;
+}
+
+.stack-group {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  background: var(--alabaster);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.stack-label {
+  color: var(--brand-strong);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .version-group {

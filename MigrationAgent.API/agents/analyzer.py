@@ -12,7 +12,7 @@ Analyze C# code and identify:
 
 Be concise and structured in your response."""
 
-SKIP_FOLDERS = {"obj", "bin", ".vs", ".git", "node_modules", "packages"}
+SKIP_FOLDERS = {"obj", "bin", ".vs", ".git", "node_modules", "packages", "ext", "bower_components"}
 
 def read_files(upload_dir: str) -> dict:
     files = {}
@@ -56,6 +56,78 @@ def _detect_patterns(upload_path: Path) -> list:
             found.append({"title": "ConfigurationManager usage", "path": f.name,
                           "action": "Move settings to IConfiguration/options pattern", "severity": "Medium"})
     return found[:30]
+
+
+def _detect_frontend_stack(upload_path: Path) -> str:
+    """
+    Detect the source frontend framework from the uploaded project files.
+    Returns a lowercase string identifier or "none" if no frontend detected.
+    Generic — checks file names, folder names and code patterns.
+    """
+    all_files = [
+        f for f in upload_path.rglob("*")
+        if f.is_file() and not any(p.lower() in SKIP_FOLDERS for p in f.parts)
+    ]
+    names_lower = {f.name.lower() for f in all_files}
+    folder_parts = {p.lower() for f in all_files for p in f.parts}
+
+    # Angular CLI (Angular 2+) — has angular.json at root
+    if "angular.json" in names_lower:
+        return "angular"
+
+    # AngularJS 1.x — check for angular.js/angular.min.js files or ng- patterns in HTML/cshtml
+    has_angularjs_file = any(
+        "angular" in f.name.lower() and f.suffix.lower() == ".js"
+        for f in all_files
+    )
+    if not has_angularjs_file:
+        # Check folder name
+        has_angularjs_file = "angularjs" in folder_parts or "angular" in folder_parts
+    if has_angularjs_file:
+        # Confirm by checking for ng- patterns or $scope in JS files
+        for f in all_files:
+            if f.suffix.lower() not in {".js", ".html", ".cshtml"}:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")[:5000]
+                if any(p in text for p in ["ng-controller", "ng-repeat", "ng-model", "$scope", "angular.module"]):
+                    return "angularjs"
+            except Exception:
+                pass
+        return "angularjs"  # file present even if patterns not found
+
+    # React — has .jsx/.tsx files or react in package.json
+    has_jsx = any(f.suffix.lower() in {".jsx", ".tsx"} for f in all_files)
+    if has_jsx:
+        return "react"
+    for f in all_files:
+        if f.name.lower() == "package.json":
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                if '"react"' in text:
+                    return "react"
+            except Exception:
+                pass
+
+    # Vue — has .vue files or vue in package.json
+    has_vue = any(f.suffix.lower() == ".vue" for f in all_files)
+    if has_vue:
+        return "vue"
+    for f in all_files:
+        if f.name.lower() == "package.json":
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                if '"vue"' in text:
+                    return "vue"
+            except Exception:
+                pass
+
+    # jQuery — has jquery*.js but no framework above
+    has_jquery = any("jquery" in f.name.lower() and f.suffix.lower() == ".js" for f in all_files)
+    if has_jquery:
+        return "jquery"
+
+    return "none"
 
 
 def _detect_ui_profile(upload_path: Path) -> dict:
@@ -212,6 +284,7 @@ def analyze(upload_dir: str, from_version: str, to_version: str) -> dict:
         "recommended_path": recommended,
         "analysis": analysis_text,
         "ui_profile": _detect_ui_profile(upload_path),
+        "source_frontend": _detect_frontend_stack(upload_path),
     }
 
 
@@ -233,6 +306,10 @@ class AnalyzerAgent(BaseAgent):
 
     def observe(self, result: dict, context: MigrationContext) -> AgentObservation:
         context.analysis = result
+        # Write detected frontend stack into context so all agents can read it
+        detected = result.get("source_frontend", "none")
+        if detected and detected != "none":
+            context.source_frontend = detected
         return AgentObservation(
             agent=self.name,
             status="completed" if result.get("success") else "failed",
@@ -240,6 +317,7 @@ class AnalyzerAgent(BaseAgent):
                 f"Found {result.get('project_count', 0)} project(s), "
                 f"{result.get('source_file_count', 0)} C# file(s), "
                 f"complexity: {result.get('complexity', {}).get('level', 'Unknown')}."
+                + (f" Frontend: {detected}." if detected and detected != "none" else "")
             ),
             actionable=False,
             recommended_next="migrator",

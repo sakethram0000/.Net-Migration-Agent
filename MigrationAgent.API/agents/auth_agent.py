@@ -494,30 +494,52 @@ def _inject_authorize_only(content: str) -> tuple:
 
 def _ensure_auth_middleware(content: str, template: str) -> tuple:
     """
-    Ensure UseAuthentication + UseAuthorization are present and in correct order.
-    If already present, fix order if wrong. If missing, inject before app.Run().
+    Ensure UseAuthentication + UseAuthorization are present and in correct order,
+    and placed BEFORE app.MapControllers() / app.MapControllerRoute() / app.Run().
+    If already present in correct position — do nothing.
+    If order is wrong or position is wrong — remove all occurrences and re-inject.
     """
     changes = []
     has_use_auth  = "UseAuthentication()" in content
     has_use_authz = "UseAuthorization()" in content
 
+    # Determine correct anchor — inject before MapControllers or MapControllerRoute or Run
+    map_markers = ["app.MapControllers()", "app.MapControllerRoute(", "app.Run()"]
+    anchor = next((m for m in map_markers if m in content), None)
+
     if has_use_auth and has_use_authz:
-        # Check order — fix if wrong
         auth_pos  = content.index("UseAuthentication()")
         authz_pos = content.index("UseAuthorization()")
-        if auth_pos > authz_pos:
-            # Remove both and re-inject in correct order
-            content = content.replace("app.UseAuthentication();", "")
-            content = content.replace("app.UseAuthorization();", "")
-            content = _inject_before_run(content, "\napp.UseAuthentication();\napp.UseAuthorization();\n")
-            changes.append("Fixed middleware order: UseAuthentication() moved before UseAuthorization()")
+        anchor_pos = content.index(anchor) if anchor else len(content)
+
+        order_ok    = auth_pos < authz_pos
+        position_ok = auth_pos < anchor_pos and authz_pos < anchor_pos
+
+        if order_ok and position_ok:
+            # Already correct — nothing to do
+            return content, changes
+
+        # Remove all existing occurrences and re-inject in correct place
+        content = re.sub(r'app\.UseAuthentication\(\);[ \t]*\n?', '', content)
+        content = re.sub(r'app\.UseAuthorization\(\);[ \t]*\n?', '', content)
+        # Also remove comment lines left behind
+        content = re.sub(r'// Auth Agent:.*middleware.*\n', '', content)
+        content = _inject_before_map_or_run(content, "\napp.UseAuthentication();\napp.UseAuthorization();\n")
+        changes.append("Fixed auth middleware: UseAuthentication() + UseAuthorization() placed before MapControllers()")
         return content, changes
 
-    if not has_use_auth or not has_use_authz:
-        content = _inject_before_run(content, template)
-        changes.append("Injected UseAuthentication() and UseAuthorization() middleware into Program.cs")
-
+    # One or both missing — inject fresh
+    content = _inject_before_map_or_run(content, template)
+    changes.append("Injected UseAuthentication() and UseAuthorization() middleware into Program.cs")
     return content, changes
+
+
+def _inject_before_map_or_run(content: str, snippet: str) -> str:
+    """Inject snippet before app.MapControllers() or app.MapControllerRoute() or app.Run() — whichever comes first."""
+    for marker in ["app.MapControllers()", "app.MapControllerRoute(", "app.Run()"]:
+        if marker in content:
+            return content.replace(marker, snippet + marker, 1)
+    return content + "\n" + snippet
 
 
 def _inject_before_build(content: str, snippet: str) -> str:

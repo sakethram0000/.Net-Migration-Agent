@@ -9,6 +9,8 @@ const steps = ['Ingest', 'Analyze', 'Transform', 'Validate', 'Package'];
 function App() {
   const [fromVersion, setFromVersion] = useState('.NET Framework 4.8');
   const [toVersion, setToVersion] = useState('.NET 8');
+  const [sourceFrontend, setSourceFrontend] = useState('none');
+  const [targetFrontend, setTargetFrontend] = useState('none');
   const [files, setFiles] = useState([]);
   const [githubUrl, setGithubUrl] = useState('');
   const [githubAuth, setGithubAuth] = useState('public');
@@ -100,6 +102,8 @@ function App() {
       const form = new FormData();
       form.append('from_version', fromVersion);
       form.append('to_version', toVersion);
+      if (sourceFrontend && sourceFrontend !== 'none') form.append('source_frontend', sourceFrontend);
+      if (targetFrontend && targetFrontend !== 'none') form.append('target_frontend', targetFrontend);
       const data = await postForm('/api/migration/migrate', form);
       log(`Migration job queued: ${data.job_id}`);
       poll(data.job_id);
@@ -184,9 +188,17 @@ function App() {
           <div className="ma-card-header"><div className="ma-card-title">Migration Path</div><button onClick={loadRuntime}>Runtime Status</button></div>
           <div className="ma-card-body">
             <div className="version-row">
-              <Select label="From Version" value={fromVersion} setValue={setFromVersion} values={['.NET Framework 4.5', '.NET Framework 4.6', '.NET Framework 4.7', '.NET Framework 4.8', '.NET Core 3.1', '.NET 5', '.NET 6', '.NET 7']} />
-              <div className="version-arrow">to</div>
-              <Select label="To Version" value={toVersion} setValue={setToVersion} values={['.NET 8', '.NET 9', '.NET 10']} />
+              <div className="stack-group">
+                <div className="stack-label">Source</div>
+                <Select label="Frontend" value={sourceFrontend} setValue={setSourceFrontend} values={['none', 'angularjs', 'jquery', 'react', 'vue', 'blazor']} />
+                <Select label="Backend" value={fromVersion} setValue={setFromVersion} values={['.NET Framework 4.5', '.NET Framework 4.6', '.NET Framework 4.7', '.NET Framework 4.8', '.NET Core 3.1', '.NET 5', '.NET 6', '.NET 7']} />
+              </div>
+              <div className="version-arrow">→</div>
+              <div className="stack-group">
+                <div className="stack-label">Target</div>
+                <Select label="Frontend" value={targetFrontend} setValue={setTargetFrontend} values={['none', 'react', 'angular', 'vue', 'blazor']} />
+                <Select label="Backend" value={toVersion} setValue={setToVersion} values={['.NET 8', '.NET 9', '.NET 10']} />
+              </div>
             </div>
             <div className={`compat-matrix ${inventory?.complexity?.level === 'High' ? 'warning' : 'success'}`}>
               <div className="compat-left">

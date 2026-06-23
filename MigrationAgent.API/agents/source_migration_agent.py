@@ -478,7 +478,12 @@ def read_packages_config(csproj_path: str, upload_dir: str) -> str:
     except Exception:
         return ""
 
-def migrate(upload_dir: str, from_version: str, to_version: str, progress_callback: Optional[Callable[[str], None]] = None) -> dict:
+def migrate(upload_dir: str, from_version: str, to_version: str,
+            source_frontend: str = None, target_frontend: str = None,
+            progress_callback: Optional[Callable[[str], None]] = None) -> dict:
+
+    # Determine if target is REST API mode (frontend is separate — no Razor views)
+    is_rest_api_target = target_frontend in ("react", "angular", "vue")
     files = read_files_recursive(upload_dir)
     if not files:
         return {"success": False, "error": "No C# files found in upload directory"}
@@ -514,7 +519,40 @@ def migrate(upload_dir: str, from_version: str, to_version: str, progress_callba
         ns_match = re.search(r'namespace\s+([\w\.]+)', global_content)
         app_namespace = ns_match.group(1) if ns_match else 'WebApplication'
 
-        program_cs_code = """using Microsoft.AspNetCore.Builder;
+        if is_rest_api_target:
+            program_cs_code = """using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseCors();
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+"""
+        else:
+            program_cs_code = """using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -570,6 +608,10 @@ app.Run();
         program_content = files[program_path]
         startup_content = files[startup_path]
 
+        rest_api_hint = (
+            "\n- Target frontend is a separate SPA — use AddControllers() not AddControllersWithViews(), add CORS, no Razor views"
+            if is_rest_api_target else ""
+        )
         prompt = f"""Migrate these two files from {from_version} to .NET 8 minimal hosting.
 
 --- Program.cs ---
@@ -587,7 +629,7 @@ Rules:
 - Keep CORS if present (AddCors, UseCors)
 - Keep any custom services, repositories, or interfaces registered
 - End with app.Run()
-- NO Startup class, NO CreateHostBuilder, NO IHostBuilder
+- NO Startup class, NO CreateHostBuilder, NO IHostBuilder{rest_api_hint}
 - Return ONLY the complete Program.cs inside a ```csharp block."""
 
         response = ask_with_system(SYSTEM_PROGRAM, prompt, agent_name="Source Migration Agent")
@@ -801,6 +843,8 @@ class MigratorAgent(BaseAgent):
             upload_dir=context.upload_dir,
             from_version=context.from_version,
             to_version=context.to_version,
+            source_frontend=context.source_frontend,
+            target_frontend=context.target_frontend,
             progress_callback=context.progress_callback,
         )
         return result

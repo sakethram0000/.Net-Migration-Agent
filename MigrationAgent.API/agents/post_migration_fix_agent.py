@@ -6,8 +6,27 @@ Works for ANY .NET project migration to .NET 8, 9 or 10.
 from pathlib import Path
 import re
 
-# Packages to always remove from .csproj
+# Packages to always remove from .csproj — dead libraries with no .NET 8 equivalent
+# DotNetOpenAuth — dead since 2013, never ported to .NET Core
+# knockoutjs, System.Spatial, Microsoft.Data.Edm, Microsoft.Data.OData — legacy only
 REMOVE_PACKAGES = {
+    "DotNetOpenAuth.AspNet",
+    "DotNetOpenAuth.Core",
+    "DotNetOpenAuth.OAuth",
+    "DotNetOpenAuth.OAuth.Consumer",
+    "DotNetOpenAuth.OAuth.Core",
+    "DotNetOpenAuth.OpenId",
+    "DotNetOpenAuth.OpenId.Core",
+    "DotNetOpenAuth.OpenId.RelyingParty",
+    "knockoutjs",
+    "System.Spatial",
+    "Microsoft.Data.Edm",
+    "Microsoft.Data.OData",
+    "System.Net.Http",
+    "EntityFramework",
+    "EntityFramework.Core",
+    "EntityFramework.Relational",
+    "EntityFramework.SqlServer",
     "Microsoft.AspNetCore.SpaServices.Extensions",
     "Npgsql.EntityFrameworkCore.PostgreSQL.Design",
     "Microsoft.AspNetCore.SpaServices",
@@ -16,6 +35,9 @@ REMOVE_PACKAGES = {
     "Microsoft.AspNet.Mvc",
     "Microsoft.AspNet.WebPages",
     "Microsoft.Web.Infrastructure",
+    "WebMatrix.WebData",
+    "WebMatrix.Data",
+    "Microsoft.Web.WebPages.OAuth",
 }
 
 # Package versions per target .NET version
@@ -725,6 +747,108 @@ public class {ctx_name} : DbContext
             if fixed != content:
                 cshtml_file.write_text(fixed, encoding="utf-8")
                 fixes_applied.append(f"Fixed Razor syntax in {cshtml_file.name}")
+        except Exception:
+            pass
+
+    # --- Fix 6: Clean EDMX connection strings in appsettings.json ---
+    # EDMX format: metadata=res://*/X.csdl|...|X.msl;provider=...;provider connection string="..."
+    # Extract the real SQL Server string buried inside it.
+    # Generic — detects the metadata=res:// pattern in any appsettings.json.
+    for json_file in out_path.rglob("appsettings*.json"):
+        if any(part.lower() in SKIP_FOLDERS for part in json_file.parts):
+            continue
+        try:
+            content = json_file.read_text(encoding="utf-8", errors="ignore")
+            if "metadata=res://" not in content:
+                continue
+            # Extract plain SQL Server connection string from inside the EDMX format
+            # The real string is after "provider connection string=" inside the value
+            def fix_edmx_conn(m):
+                raw = m.group(0)
+                # Try to extract the inner connection string
+                inner = re.search(
+                    r'provider connection string=(?:&quot;|["\'])([^\'"&]+)',
+                    raw, re.IGNORECASE
+                )
+                if inner:
+                    plain = inner.group(1).replace('&quot;', '').replace('&amp;', '&')
+                    # Return a clean JSON string value
+                    return f'": "{plain}"'
+                return raw
+            # Match the full JSON value containing metadata=res://
+            fixed_content = re.sub(
+                r'":\s*"[^"]*metadata=res://[^"]*"',
+                fix_edmx_conn,
+                content
+            )
+            if fixed_content != content:
+                json_file.write_text(fixed_content, encoding="utf-8")
+                fixes_applied.append(f"Fixed EDMX connection string in {json_file.name} — extracted plain SQL Server string")
+        except Exception:
+            pass
+
+    # --- Fix 7: Remove UnintentionalCodeFirstException from any DbContext ---
+    # This is an EF4 EDMX scaffold artifact — doesn't exist in EF Core.
+    # Generic — detects the exact class name in any .cs file.
+    for cs_file in out_path.rglob("*.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            if "UnintentionalCodeFirstException" not in content:
+                continue
+            fixed = re.sub(
+                r'throw new UnintentionalCodeFirstException\(\);',
+                'base.OnModelCreating(modelBuilder);',
+                content
+            )
+            # Also remove any using for the old EF4 namespace that contained it
+            fixed = fixed.replace('using System.Data.Entity.Infrastructure;\n', '')
+            if fixed != content:
+                cs_file.write_text(fixed, encoding="utf-8")
+                fixes_applied.append(f"Fixed {cs_file.name} — replaced UnintentionalCodeFirstException with base.OnModelCreating()")
+        except Exception:
+            pass
+
+    # --- Fix 8: Remove LLM-generated empty method stub placeholders ---
+    # The LLM sometimes generates empty methods with "// Implementation of X" comments
+    # These cause CS0161 (not all code paths return a value) compile errors.
+    # Generic — detects the pattern in any .cs file.
+    for cs_file in out_path.rglob("*.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            if "// Implementation of" not in content:
+                continue
+            fixed = content
+            # Replace empty async Task<bool> stubs with return false
+            fixed = re.sub(
+                r'(private\s+async\s+Task<bool>[^{]+\{)\s*\/\/[^\n]*\n\s*(\})',
+                r'\1\n        return false;\n        \2',
+                fixed
+            )
+            # Replace empty async Task<string> stubs with return string.Empty
+            fixed = re.sub(
+                r'(private\s+async\s+Task<string>[^{]+\{)\s*\/\/[^\n]*\n\s*(\})',
+                r'\1\n        return string.Empty;\n        \2',
+                fixed
+            )
+            # Replace empty async Task<IEnumerable<\w+>> stubs with return empty list
+            fixed = re.sub(
+                r'(private\s+async\s+Task<IEnumerable<(\w+)>>[^{]+\{)\s*\/\/[^\n]*\n\s*(\})',
+                r'\1\n        return Enumerable.Empty<\2>();\n        \3',
+                fixed
+            )
+            # Replace empty async Task (no return) stubs — just remove the comment
+            fixed = re.sub(
+                r'(private\s+async\s+Task\s+\w+[^{]+\{)\s*\/\/[^\n]*\n\s*(\})',
+                r'\1\n        await Task.CompletedTask;\n        \2',
+                fixed
+            )
+            if fixed != content:
+                cs_file.write_text(fixed, encoding="utf-8")
+                fixes_applied.append(f"Fixed {cs_file.name} — replaced empty LLM stub methods with valid return values")
         except Exception:
             pass
 

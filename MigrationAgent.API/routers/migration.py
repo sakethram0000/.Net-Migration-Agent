@@ -41,7 +41,8 @@ class MigrateRequest(BaseModel):
     from_version: str
     to_version: str
 
-def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str):
+def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_version: str,
+                      source_frontend: str = None, target_frontend: str = None):
     try:
         migration_jobs[job_id]["status"] = "running"
         migration_jobs[job_id]["stage"] = "migrating"
@@ -91,6 +92,8 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
             output_dir=OUTPUT_DIR,
             from_version=from_version,
             to_version=to_version,
+            source_frontend=source_frontend,
+            target_frontend=target_frontend,
             progress_callback=update_progress,
         )
 
@@ -148,6 +151,8 @@ async def run_migration(
     files: Optional[UploadFile] = File(None),
     github_url: Optional[str] = Form(None),
     github_token: Optional[str] = Form(None),
+    source_frontend: Optional[str] = Form(None),
+    target_frontend: Optional[str] = Form(None),
 ):
     job_id = str(uuid.uuid4())
 
@@ -243,7 +248,8 @@ async def run_migration(
     }
     background_tasks.add_task(
         run_migration_job, job_id, UPLOAD_DIR,
-        from_version, to_version
+        from_version, to_version,
+        source_frontend, target_frontend
     )
     return {"job_id": job_id, "status": "queued", "message": "Migration started in background"}
 
