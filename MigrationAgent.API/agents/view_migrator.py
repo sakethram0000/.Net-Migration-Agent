@@ -359,6 +359,9 @@ Rules:
 - Convert AngularJS services ($http, $scope, $routeParams) to React hooks or props
 - Keep ALL business logic and API endpoint URLs exactly as-is
 - Keep the same CSS class names — same look and feel
+- Replace bootbox.confirm() with window.confirm() — do not import bootbox
+- Any async operation inside a callback must use an async arrow function: e.g. onClick={async () => { await axios.delete(...) }}
+- Never use await inside a non-async function or callback
 - Export the component as default export
 - Return ONLY the complete .jsx file content inside a ```jsx block. Nothing else."""
 
@@ -414,16 +417,25 @@ def _generate_react_scaffold(output_dir: Path, converted_files: list) -> list:
     # Collect converted component names for App.jsx imports
     component_imports = []
     component_uses    = []
+
+    # These are data/utility layer files — never rendered as JSX components
+    NON_COMPONENT_INDICATORS = ("service", "factory", "repository", "directive", "store", "api", "util", "helper")
+
     for js_file in converted_files:
         jsx_path = js_file.with_suffix(".jsx")
         if not jsx_path.exists():
             continue
-        # Derive relative path from src/ to the .jsx file
+        # Skip service/factory/directive files — not visual components
+        name_lower = js_file.stem.lower()
+        parent_lower = js_file.parent.name.lower()
+        if any(ind in name_lower or ind in parent_lower for ind in NON_COMPONENT_INDICATORS):
+            continue
         try:
             rel = jsx_path.relative_to(web_root)
-            component_name = jsx_path.stem.replace("-", "_").replace(".", "_")
-            # Capitalise first letter for component name convention
-            component_name = component_name[0].upper() + component_name[1:]
+            raw_name = jsx_path.stem.replace("-", "_").replace(".", "_")
+            component_name = raw_name[0].upper() + raw_name[1:]
+            if component_name == "App":
+                component_name = "AppRoot"
             import_path = "../" + str(rel).replace("\\", "/")
             component_imports.append(f"import {component_name} from '{import_path}';")
             component_uses.append(f"      <{component_name} />")

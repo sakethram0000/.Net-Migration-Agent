@@ -164,6 +164,8 @@ def detect_auth(upload_dir: str) -> dict:
     identity_signals = [
         "AddIdentity", "UserManager", "RoleManager",
         "IdentityUser", "IdentityRole", "SignInManager",
+        "WebSecurity", "SimpleMembership", "WebMatrix.WebData",
+        "InitializeSimpleMembershipAttribute",
     ]
     for path, content in all_cs.items():
         if any(s in content for s in identity_signals):
@@ -273,7 +275,22 @@ def inject_auth(output_dir: str, profile: dict, progress_callback=None) -> dict:
         result["warnings"].append("Set JwtSettings:Secret, JwtSettings:Issuer and JwtSettings:Audience in appsettings.json before deploying.")
 
     elif profile["type"] == AUTH_IDENTITY:
-        ctx = profile.get("identity_context") or "ApplicationDbContext"
+        # Find the actual DbContext name from the migrated output
+        ctx = profile.get("identity_context")
+        if not ctx:
+            # Scan output for any DbContext class name
+            for cs_file in Path(output_dir).rglob("*.cs"):
+                if any(p.lower() in SKIP_FOLDERS for p in cs_file.parts):
+                    continue
+                try:
+                    text = cs_file.read_text(encoding="utf-8", errors="ignore")
+                    m = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*(?:\w+)?DbContext', text)
+                    if m:
+                        ctx = m.group(1)
+                        break
+                except Exception:
+                    pass
+        ctx = ctx or "ApplicationDbContext"
         content, changes = _inject_identity(content, ctx)
         result["changes"].extend(changes)
         _ensure_package(out, "Microsoft.AspNetCore.Identity.EntityFrameworkCore", "8.0.4")

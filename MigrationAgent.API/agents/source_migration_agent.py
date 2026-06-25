@@ -12,6 +12,8 @@ Rules:
 - Use file-scoped namespaces (namespace Foo.Bar; not namespace Foo.Bar { })
 - Replace obsolete APIs with .NET 8 equivalents
 - Keep ALL business logic intact — do not remove any methods or properties
+- Do NOT prefix custom enum or class types defined in the same project with any namespace — use them directly by their simple name (e.g. use ManageMessageId not Microsoft.AspNetCore.Identity.ManageMessageId)
+- When a controller or class injects a specific DbContext type (e.g. sampleAngularWithMVCEntities), keep that EXACT type in the constructor and field — NEVER replace it with the generic DbContext base class
 - Replace System.Web.Mvc with Microsoft.AspNetCore.Mvc
 - Replace System.Web.Http with Microsoft.AspNetCore.Mvc
 - Replace HttpContext.Current with IHttpContextAccessor injected via constructor
@@ -72,6 +74,7 @@ Rules:
 - Remove any Console.WriteLine or debug statements that were NOT present in the original code
 - If a class has no instance state and all methods are utility/helper methods, keep it static — do not convert static classes to instance classes
 - Fix any duplicate type keywords in method/lambda parameters (e.g. 'double double posLong' should be 'double posLong')
+- Never replace a specific named DbContext type with the generic DbContext base class — always preserve the original context type name
 - If code is already correct, return it as-is
 - Return ONLY the corrected code inside a ```csharp block. Nothing else."""
 

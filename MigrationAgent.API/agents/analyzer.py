@@ -140,6 +140,8 @@ def _detect_ui_profile(upload_path: Path) -> dict:
     has_angular   = any(f.name == "angular.json" for f in all_files)
     has_react     = any(f.name == "package.json" for f in all_files)
     has_bundling  = any(f.name.lower() == "bundleconfig.cs" for f in all_files)
+    # Build folder parts set for frontend detection
+    folder_parts  = {p.lower() for f in all_files for p in f.parts}
 
     # Count HTML helpers in cshtml files
     html_helper_count = 0
@@ -159,10 +161,21 @@ def _detect_ui_profile(upload_path: Path) -> dict:
                    f"will be automatically converted to .NET 8 Razor Pages.")
         support = "not_supported"
     elif cshtml_files:
-        ui_type = "razor_mvc"
-        warning = (f"Razor MVC UI detected ({len(cshtml_files)} view(s)) — "
-                   f"will be automatically migrated to .NET 8.")
-        support = "partial"
+        # Check if AngularJS is also present alongside Razor MVC views
+        has_angularjs = "angularjs" in folder_parts or "angular" in folder_parts or any(
+            "angular" in f.name.lower() and f.suffix.lower() == ".js" for f in all_files
+        )
+        if has_angularjs:
+            ui_type = "razor_mvc+angularjs"
+            warning = (f"Razor MVC + AngularJS UI detected ({len(cshtml_files)} view(s)) — "
+                       f"Razor views will be migrated to .NET 8 Tag Helpers, "
+                       f"AngularJS files will be converted to React if target frontend is selected.")
+            support = "partial"
+        else:
+            ui_type = "razor_mvc"
+            warning = (f"Razor MVC UI detected ({len(cshtml_files)} view(s)) — "
+                       f"will be automatically migrated to .NET 8.")
+            support = "partial"
     elif razor_files:
         ui_type = "blazor"
         warning = (f"Blazor UI detected ({len(razor_files)} component(s)) — "
@@ -256,17 +269,21 @@ def analyze(upload_dir: str, from_version: str, to_version: str) -> dict:
         recommended = (f"Direct migration to {to_version} is reasonable with "
                        f"restore/build/test validation gates.")
 
-    # LLM analysis summary (best-effort — does not block if LLM fails)
+    # LLM analysis summary — runs in background thread so it never blocks the UI
     analysis_text = ""
-    try:
-        code_summary = ""
-        for name, content in list(files.items())[:8]:
-            code_summary += f"\n--- {name} ---\n{content[:800]}\n"
-        prompt = (f"Analyze this .NET code for migration from {from_version} to {to_version}:\n"
-                  f"{code_summary}\nProvide top 3 breaking changes needed in 2 sentences each.")
-        analysis_text = ask_with_system(SYSTEM_PROMPT, prompt, agent_name="Analyzer Agent")
-    except Exception:
-        pass
+    def _run_llm_summary():
+        nonlocal analysis_text
+        try:
+            code_summary = ""
+            for name, content in list(files.items())[:8]:
+                code_summary += f"\n--- {name} ---\n{content[:800]}\n"
+            prompt = (f"Analyze this .NET code for migration from {from_version} to {to_version}:\n"
+                      f"{code_summary}\nProvide top 3 breaking changes needed in 2 sentences each.")
+            analysis_text = ask_with_system(SYSTEM_PROMPT, prompt, agent_name="Analyzer Agent")
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_run_llm_summary, daemon=True).start()
 
     return {
         "success": True,

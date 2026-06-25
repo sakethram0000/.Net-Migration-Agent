@@ -169,7 +169,7 @@ function App() {
           <div className="ma-hero-brand">
             <div className="ma-hero-logo">.N</div>
             <div>
-              <div className="ma-hero-title">.NET Migration Agent</div>
+              <div className="ma-hero-title">Modernization Agent</div>
               <div className="ma-hero-subtitle">Migrate legacy .NET applications to modern target versions with Microsoft Agent Framework orchestration and LLM-assisted build fixing.</div>
             </div>
           </div>

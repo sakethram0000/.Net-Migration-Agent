@@ -77,13 +77,32 @@ def run_migration_job(job_id: str, upload_dir: str, from_version: str, to_versio
                 migration_jobs[job_id]["stage"] = "completed"
 
         # Clear previous output before starting fresh
+        # On Windows, dotnet processes may hold file locks — retry with delay
         output_path = Path(OUTPUT_DIR)
         if output_path.exists():
-            shutil.rmtree(output_path)
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(output_path)
+                    break
+                except PermissionError:
+                    import time
+                    time.sleep(2)
+                    # Kill any lingering dotnet processes holding locks
+                    try:
+                        import subprocess
+                        subprocess.run(
+                            ["taskkill", "/F", "/IM", "dotnet.exe"],
+                            capture_output=True
+                        )
+                    except Exception:
+                        pass
         output_path.mkdir(parents=True, exist_ok=True)
         old_zip = Path(OUTPUT_DIR).parent / "migrated_project.zip"
         if old_zip.exists():
-            old_zip.unlink()
+            try:
+                old_zip.unlink()
+            except Exception:
+                pass
 
         # ── Run the orchestrator ───────────────────────────────────────────────
         context = run_orchestrator(

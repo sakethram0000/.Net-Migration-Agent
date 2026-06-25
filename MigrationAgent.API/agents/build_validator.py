@@ -34,6 +34,7 @@ def pre_build_clean(output_dir: str, progress_callback=None) -> list:
         ("Global.asax.cs",   "Removed Global.asax.cs — startup logic merged into Program.cs"),
         ("Web.config",       "Removed Web.config — not needed in ASP.NET Core"),
         ("AssemblyInfo.cs",  "Removed AssemblyInfo.cs — auto-generated in SDK-style projects"),
+        ("InitializeSimpleMembershipAttribute.cs", "Removed InitializeSimpleMembershipAttribute.cs — legacy SimpleMembership, not needed in .NET 8"),
     ]
     for filename, message in files_to_remove:
         for match in out.rglob(filename):

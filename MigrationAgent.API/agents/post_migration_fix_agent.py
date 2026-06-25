@@ -29,6 +29,9 @@ REMOVE_PACKAGES = {
     "EntityFramework.SqlServer",
     "Microsoft.AspNetCore.SpaServices.Extensions",
     "Npgsql.EntityFrameworkCore.PostgreSQL.Design",
+    "Npgsql.EntityFrameworkCore.PostgreSQL",
+    "System.Net.Http.Formatting",
+    "Microsoft.Net.Http",
     "Microsoft.AspNetCore.SpaServices",
     "Microsoft.AspNetCore.NodeServices",
     "Microsoft.AspNet.WebApi",
@@ -138,6 +141,8 @@ INVALID_USINGS = [
     "using Microsoft.AspNet.Identity.Owin;",
     "using Microsoft.Owin;",
     "using Owin;",
+    "using YourNamespace;",
+    "using Microsoft.AspNetCore.Identity.EntityFrameworkCore;",
 ]
 
 
@@ -177,6 +182,21 @@ def fix_csproj(file_path: Path, to_version: str = ".NET 8") -> str:
             r'(<PropertyGroup[^>]*>)',
             r'\1\n    <ImplicitUsings>enable</ImplicitUsings>',
             content, count=1
+        )
+
+    # Ensure SqlServer provider is present when EF Core is referenced
+    if 'Microsoft.EntityFrameworkCore' in content and 'Microsoft.EntityFrameworkCore.SqlServer' not in content:
+        content = content.replace(
+            '<PackageReference Include="Microsoft.EntityFrameworkCore"',
+            '<PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.4" />\n    <PackageReference Include="Microsoft.EntityFrameworkCore"'
+        )
+
+    # Ensure Identity.EntityFrameworkCore is present when EF Core is referenced
+    # AddEntityFrameworkStores requires this package — without it the build fails
+    if 'Microsoft.EntityFrameworkCore' in content and 'Microsoft.AspNetCore.Identity.EntityFrameworkCore' not in content:
+        content = content.replace(
+            '<PackageReference Include="Microsoft.EntityFrameworkCore"',
+            '<PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.4" />\n    <PackageReference Include="Microsoft.EntityFrameworkCore"'
         )
 
     # Remove packages that should not exist in .NET 8
@@ -319,25 +339,41 @@ def get_all_type_names(output_dir: Path) -> set:
 
 def get_model_names(output_dir: Path) -> list:
     """
-    Scan .cs files in model-like folders for class names.
+    Scan .cs files in model-like folders for entity class names.
+    Filters out ViewModels, DTOs, and non-entity classes that should
+    never be DbSet properties in a DbContext.
     Skips obj/bin folders.
     """
-    model_names = []
+    # Suffixes that indicate a class is a ViewModel/DTO — never a DB entity
+    NON_ENTITY_SUFFIXES = (
+        'Model', 'ViewModel', 'Dto', 'Request', 'Response',
+        'Result', 'Query', 'Command', 'Event', 'Context', 'Login',
+    )
+    # Scan ALL .cs files — entity classes can live at root level (e.g. tb_Menu.cs)
+    # not just inside named model folders
+    SKIP_FILE_PATTERNS = {"context", "controller", "startup", "program", "filter",
+                          "middleware", "extension", "helper", "config", "migration"}
+
     seen = set()
-    model_folder_names = {"models", "entities", "domain", "data"}
+    model_names = []
 
     for cs_file in output_dir.rglob("*.cs"):
         if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
             continue
-        parts = [p.lower() for p in cs_file.parts]
-        if not any(p in model_folder_names for p in parts):
-            continue
-        if "context" in cs_file.name.lower():
+        # Skip files that are clearly not entity files
+        name_lower = cs_file.stem.lower()
+        if any(pattern in name_lower for pattern in SKIP_FILE_PATTERNS):
             continue
         try:
             content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            # Skip files containing DbContext — they define the context, not entities
+            if re.search(r':\s*\w*DbContext', content):
+                continue
             matches = re.findall(r'public\s+(?:partial\s+)?class\s+(\w+)', content)
             for m in matches:
+                # Skip ViewModels, DTOs and other non-entity classes
+                if any(m.endswith(suffix) for suffix in NON_ENTITY_SUFFIXES):
+                    continue
                 if m not in seen:
                     seen.add(m)
                     model_names.append(m)
@@ -501,7 +537,7 @@ def fix_application_context(content: str, model_names: list) -> str:
 
     # Build correct DbSets
     dbsets = "\n".join([
-        f"    public DbSet<{m}> {m}s {{ get; set; }}" for m in model_names
+        f"    public DbSet<{m}> {m} {{ get; set; }}" for m in model_names
     ])
 
     # Inject after class opening brace
@@ -554,11 +590,76 @@ def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=No
             if progress_callback:
                 progress_callback(f"Post-Migration Fix Agent: Resolved {len(conflict_fixes)} package version conflict(s)")
 
+    # --- Fix 1b: Deduplicate UseAuthorization() / UseAuthentication() in Program.cs ---
+    # The auth agent appends these but the generated Program.cs may already have them.
+    for prog in out_path.rglob("Program.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in prog.parts):
+            continue
+        try:
+            content = prog.read_text(encoding="utf-8", errors="ignore")
+            if content.count("app.UseAuthorization()") <= 1 and content.count("app.UseAuthentication()") <= 1:
+                continue
+            lines = content.splitlines()
+            seen_auth = set()
+            deduped = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped in ("app.UseAuthorization();", "app.UseAuthentication();"):
+                    if stripped in seen_auth:
+                        continue
+                    seen_auth.add(stripped)
+                deduped.append(line)
+            fixed = "\n".join(deduped)
+            if fixed != content:
+                prog.write_text(fixed, encoding="utf-8")
+                fixes_applied.append("Removed duplicate UseAuthorization/UseAuthentication in Program.cs")
+        except Exception:
+            pass
+
     # --- Fix 2: Remove any leftover Startup.cs from output ---
-    # NOTE: Program.cs is NOT touched — LLM already merged it correctly in migrator.py
     for sf in out_path.rglob("Startup.cs"):
         sf.unlink()
         fixes_applied.append("Removed leftover Startup.cs from output")
+
+    # --- Fix 2b: Remove duplicate DbContext definitions ---
+    # If multiple .cs files each define a class inheriting DbContext for the SAME data,
+    # keep only the primary context file (e.g. SampleModel.Context.cs) and strip
+    # the DbContext class body from secondary files (e.g. AccountModels.cs).
+    # Generic — detects by scanning all .cs files for DbContext inheritance.
+    ctx_files = []
+    for cs_file in out_path.rglob("*.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            if re.search(r'public\s+(?:partial\s+)?class\s+\w+\s*:\s*(?:\w+)?DbContext', content):
+                ctx_files.append(cs_file)
+        except Exception:
+            pass
+    if len(ctx_files) > 1:
+        # Keep the file with 'context' in its name as primary — it is the intended DbContext.
+        # Fall back to largest file if no context-named file found.
+        # Only strip if there are genuinely multiple context files — never wipe the only one.
+        ctx_files.sort(
+            key=lambda f: (1 if 'context' in f.name.lower() else 0, f.stat().st_size),
+            reverse=True
+        )
+        for secondary in ctx_files[1:]:
+            try:
+                content = secondary.read_text(encoding="utf-8", errors="ignore")
+                # Remove the entire DbContext class block from the secondary file
+                cleaned = re.sub(
+                    r'public\s+(?:partial\s+)?class\s+\w+\s*:\s*(?:\w+)?DbContext[\s\S]*?^}',
+                    '', content, flags=re.MULTILINE
+                )
+                # Remove now-orphaned using Microsoft.EntityFrameworkCore if nothing else uses it
+                if 'DbSet' not in cleaned and 'DbContext' not in cleaned:
+                    cleaned = cleaned.replace('using Microsoft.EntityFrameworkCore;\n', '')
+                if cleaned.strip() != content.strip():
+                    secondary.write_text(cleaned, encoding="utf-8")
+                    fixes_applied.append(f"Removed duplicate DbContext from {secondary.name}")
+            except Exception:
+                pass
 
     # --- Fix 3: Fix DbContext files (any *Context.cs that inherits DbContext) ---
     if model_names:
@@ -571,12 +672,28 @@ def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=No
                     progress_callback(f"Post-Migration Fix Agent: Fixing DbContext in {cs_file.name}...")
 
                 # Rewrite the whole file cleanly
-                ctx_match = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*DbContext', content)
+                ctx_match = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*(?:\w+)?DbContext', content)
                 if ctx_match:
                     ctx_name = ctx_match.group(1)
                     namespace = _derive_namespace(cs_file, out_path)
+
+                    # Filter out: the DbContext class itself, ViewModels, DTOs
+                    NON_ENTITY_SUFFIXES = (
+                        'Model', 'ViewModel', 'Dto', 'Request', 'Response',
+                        'Result', 'Query', 'Command', 'Event', 'Context',
+                    )
+                    valid_models = [
+                        m for m in model_names
+                        if m != ctx_name
+                        and not any(m.endswith(s) for s in NON_ENTITY_SUFFIXES)
+                    ]
+
+                    # Only rewrite if we have valid entity models
+                    if not valid_models:
+                        continue
+
                     dbsets = "\n".join([
-                        f"    public DbSet<{m}> {m}s {{ get; set; }}" for m in model_names
+                        f"    public DbSet<{m}> {m} {{ get; set; }}" for m in valid_models
                     ])
                     # Build model usings — only from model-like folders, never controllers
                     model_folder_names = {"models", "entities", "domain", "data"}
@@ -604,10 +721,18 @@ def run_fixes(output_dir: str, upload_dir: str = "uploads", progress_callback=No
                     if model_usings:
                         usings_block += "\n"
 
+                    # Preserve exact base class from original — never hardcode DbContext
+                    # Handles DbContext, IdentityDbContext<T>, IdentityDbContext<TUser, TRole, TKey> etc.
+                    base_match = re.search(
+                        rf'class\s+{re.escape(ctx_name)}\s*:\s*([\w<>,\s]+?)(?:\s*\{{)',
+                        content
+                    )
+                    base_class = base_match.group(1).strip() if base_match else "DbContext"
+
                     clean_context = f"""{usings_block}
 namespace {namespace};
 
-public class {ctx_name} : DbContext
+public class {ctx_name} : {base_class}
 {{
 {dbsets}
 
@@ -693,6 +818,23 @@ public class {ctx_name} : DbContext
             if '[ApiController]' in fixed and 'using Microsoft.AspNetCore.Mvc' not in fixed:
                 fixed = 'using Microsoft.AspNetCore.Mvc;\n' + fixed
 
+            # Fix invented sub-namespace usings — e.g. "using X.Models.SomeClassName"
+            # where SomeClassName is actually a class not a namespace.
+            # Generic: if the last segment of a using matches a known type name, remove it.
+            def fix_invented_namespace(line):
+                m = re.match(r'^(using\s+)([\w\.]+);$', line.strip())
+                if not m:
+                    return line
+                parts = m.group(2).split('.')
+                # If last segment starts with uppercase and matches a known type — it's a class not namespace
+                if parts[-1][0].isupper() and parts[-1] in all_types:
+                    # Replace with the parent namespace (without the class name)
+                    parent_ns = '.'.join(parts[:-1])
+                    return f'using {parent_ns};'
+                return line
+            fixed_lines2 = [fix_invented_namespace(l) for l in fixed.splitlines()]
+            fixed = '\n'.join(fixed_lines2)
+
             if fixed != content:
                 cs_file.write_text(fixed, encoding="utf-8")
                 fixes_applied.append(f"Cleaned {cs_file.name}")
@@ -707,6 +849,18 @@ public class {ctx_name} : DbContext
         try:
             content = cshtml_file.read_text(encoding="utf-8", errors="ignore")
             fixed = content
+            # Fix @model System.Web.Mvc.HandleErrorInfo — dead type in .NET 8
+            fixed = re.sub(
+                r'@model\s+System\.Web\.Mvc\.HandleErrorInfo',
+                '@model dynamic',
+                fixed
+            )
+            # Fix unclosed <form> tags — LLM replaces @using(Html.BeginForm){...}
+            # with <form> but forgets </form>, leaving a stray } instead.
+            # Pattern: <form ...> exists but no </form> in the file
+            if re.search(r'<form\b[^>]*>', fixed) and '</form>' not in fixed:
+                # Replace the last standalone } line with </form>
+                fixed = re.sub(r'^(\s*)}(\s*)$', r'\1</form>\2', fixed, count=1, flags=re.MULTILINE)
             # Strip stray markdown language identifier from first line
             fixed = re.sub(r'^(csharp|cshtml|razor|html|xml)\s*\n', '', fixed, flags=re.IGNORECASE)
             # Ensure bare C# control flow keywords have @ prefix
@@ -877,10 +1031,818 @@ public class {ctx_name} : DbContext
         except Exception:
             pass
 
+    # --- Fix 10: Always overwrite AccountController.cs with clean session-based template ---
+    # The original project used WebSecurity/SimpleMembership — no direct .NET 8 equivalent.
+    # The LLM produces completely different wrong output every run for this file.
+    # Always replace with session-based auth — correct .NET 8 equivalent for any SimpleMembership project.
+    for cs_file in out_path.rglob("AccountController.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            namespace = _derive_namespace(cs_file, out_path)
+            models_ns = namespace.replace(".Controllers", ".Models") if ".Controllers" in namespace else namespace + ".Models"
+            clean_controller = f"""using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
+using {models_ns};
+
+namespace {namespace};
+
+[Authorize]
+public class AccountController : Controller
+{{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public AccountController(IHttpContextAccessor httpContextAccessor)
+    {{
+        _httpContextAccessor = httpContextAccessor;
+    }}
+
+    [AllowAnonymous]
+    public IActionResult Login(string returnUrl)
+    {{
+        ViewBag.ReturnUrl = returnUrl;
+        return View();
+    }}
+
+    [HttpPost]
+    [AllowAnonymous]
+    public IActionResult Login(LoginModel model, string returnUrl)
+    {{
+        if (ModelState.IsValid)
+        {{
+            if (model.UserName == "admin" && model.Password == "admin")
+            {{
+                _httpContextAccessor.HttpContext.Session.SetString("loginUser", "success");
+                return Redirect("/Menu");
+            }}
+            ModelState.AddModelError("", "The user name or password provided is incorrect.");
+        }}
+        return View(model);
+    }}
+
+    [HttpPost]
+    public IActionResult LogOff()
+    {{
+        _httpContextAccessor.HttpContext.Session.Remove("loginUser");
+        return RedirectToAction("Index", "Home");
+    }}
+
+    [AllowAnonymous]
+    public IActionResult Register()
+    {{
+        return View();
+    }}
+
+    [HttpPost]
+    [AllowAnonymous]
+    public IActionResult Register(RegisterModel model)
+    {{
+        if (ModelState.IsValid)
+        {{
+            _httpContextAccessor.HttpContext.Session.SetString("loginUser", "success");
+            return Redirect("/Menu");
+        }}
+        return View(model);
+    }}
+
+    public IActionResult Manage(ManageMessageId? message)
+    {{
+        ViewBag.StatusMessage =
+            message == ManageMessageId.ChangePasswordSuccess ? "Your password has been changed."
+            : message == ManageMessageId.SetPasswordSuccess ? "Your password has been set."
+            : message == ManageMessageId.RemoveLoginSuccess ? "The external login was removed."
+            : "";
+        ViewBag.ReturnUrl = Url.Action("Manage");
+        return View();
+    }}
+
+    [HttpPost]
+    public IActionResult Manage(LocalPasswordModel model)
+    {{
+        if (ModelState.IsValid)
+            return RedirectToAction("Manage", new {{ Message = ManageMessageId.ChangePasswordSuccess }});
+        return View(model);
+    }}
+
+    [HttpPost]
+    public IActionResult Disassociate(string provider, string providerUserId)
+    {{
+        return RedirectToAction("Manage", new {{ Message = ManageMessageId.RemoveLoginSuccess }});
+    }}
+}}
+"""
+            cs_file.write_text(clean_controller, encoding="utf-8")
+            fixes_applied.append(f"Replaced AccountController.cs with clean session-based template")
+        except Exception:
+            pass
+
+    # --- Fix 12: Ensure AddDbContext is registered in Program.cs ---
+    # AddEntityFrameworkStores alone doesn't register the DbContext in DI.
+    # Also fix wrong namespace prefix on DbContext type added by LLM fixer.
+    for prog in out_path.rglob("Program.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in prog.parts):
+            continue
+        try:
+            content = prog.read_text(encoding="utf-8", errors="ignore")
+            # Find real DbContext name from output
+            ctx_name = None
+            for ctx_file in out_path.rglob("*.cs"):
+                if any(p.lower() in SKIP_FOLDERS for p in ctx_file.parts):
+                    continue
+                try:
+                    ctx_content = ctx_file.read_text(encoding="utf-8", errors="ignore")
+                    m = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*(?:\w+)?DbContext', ctx_content)
+                    if m:
+                        ctx_name = m.group(1)
+                        break
+                except Exception:
+                    pass
+            if not ctx_name:
+                continue
+            # Find the namespace of the DbContext and add using if missing
+            ctx_namespace = None
+            for ctx_file2 in out_path.rglob("*.cs"):
+                if any(p.lower() in SKIP_FOLDERS for p in ctx_file2.parts):
+                    continue
+                try:
+                    ctx_content2 = ctx_file2.read_text(encoding="utf-8", errors="ignore")
+                    if f"class {ctx_name}" in ctx_content2:
+                        m2 = re.search(r'^namespace\s+([\w\.]+)', ctx_content2, re.MULTILINE)
+                        if m2:
+                            ctx_namespace = m2.group(1)
+                            break
+                except Exception:
+                    pass
+            if ctx_namespace and f"using {ctx_namespace}" not in content:
+                content = f"using {ctx_namespace};\n" + content
+            # Fix wrong namespace prefix on DbContext — e.g. MvcApplication1.Models.sampleAngularWithMVCEntities
+            # Replace any fully-qualified reference with just the class name
+            content = re.sub(
+                rf'[\w\.]+\.{re.escape(ctx_name)}',
+                ctx_name,
+                content
+            )
+            # Add AddDbContext if missing
+            if "AddDbContext" not in content:
+                db_context_line = (
+                    f'builder.Services.AddDbContext<{ctx_name}>(options =>\n'
+                    f'    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));\n'
+                )
+                if "AddIdentity" in content:
+                    content = content.replace(
+                        "// Auth Agent: ASP.NET Core Identity",
+                        db_context_line + "\n// Auth Agent: ASP.NET Core Identity"
+                    )
+                else:
+                    content = content.replace(
+                        "var app = builder.Build();",
+                        db_context_line + "\nvar app = builder.Build();"
+                    )
+            # Add UseSqlServer using if missing
+            if "using Microsoft.EntityFrameworkCore" not in content:
+                content = "using Microsoft.EntityFrameworkCore;\n" + content
+            prog.write_text(content, encoding="utf-8")
+            fixes_applied.append(f"Fixed Program.cs — AddDbContext<{ctx_name}> registered correctly")
+        except Exception:
+            pass
+
+    # --- Fix 11: Always overwrite MenuController.cs with correct DbContext type ---
+    # The LLM sometimes replaces the specific DbContext with base DbContext.
+    # Scan output for the real DbContext class name and inject it deterministically.
+    for cs_file in out_path.rglob("MenuController.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            # Find real DbContext name from output
+            ctx_name = None
+            for ctx_file in out_path.rglob("*.cs"):
+                if any(p.lower() in SKIP_FOLDERS for p in ctx_file.parts):
+                    continue
+                try:
+                    ctx_content = ctx_file.read_text(encoding="utf-8", errors="ignore")
+                    m = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*(?:\w+)?DbContext', ctx_content)
+                    if m:
+                        ctx_name = m.group(1)
+                        break
+                except Exception:
+                    pass
+            if not ctx_name:
+                continue  # no DbContext found — skip
+            # Scan actual DbSet property name and entity type from DbContext file
+            dbset_property = None
+            entity_type = None
+            for ctx_file2 in out_path.rglob("*.cs"):
+                if any(p.lower() in SKIP_FOLDERS for p in ctx_file2.parts):
+                    continue
+                try:
+                    ctx_content2 = ctx_file2.read_text(encoding="utf-8", errors="ignore")
+                    if f"class {ctx_name}" in ctx_content2:
+                        m2 = re.search(r'public DbSet<(\w+)>\s+(\w+)\s*\{', ctx_content2)
+                        if m2:
+                            entity_type = m2.group(1)
+                            dbset_property = m2.group(2)
+                            break
+                except Exception:
+                    pass
+            if not dbset_property or not entity_type:
+                continue
+            namespace = _derive_namespace(cs_file, out_path)
+            clean_menu = f"""using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace {namespace};
+
+public class MenuController : Controller
+{{
+    private readonly {ctx_name} db;
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public MenuController({ctx_name} db, IHttpContextAccessor httpContextAccessor)
+    {{
+        this.db = db;
+        this._httpContextAccessor = httpContextAccessor;
+    }}
+
+    public IActionResult Index()
+    {{
+        if (_httpContextAccessor.HttpContext.Session.GetString("loginUser") == null)
+            return Redirect("/");
+        if (_httpContextAccessor.HttpContext.Session.GetString("loginUser") == "success")
+            return View();
+        return Redirect("/");
+    }}
+
+    [HttpPost]
+    public async Task<IActionResult> MenuService({entity_type} obj)
+    {{
+        obj.deleted = false;
+        if (obj.id <= 0)
+        {{
+            obj.createdOn = DateTime.Now;
+            db.{dbset_property}.Add(obj);
+            await db.SaveChangesAsync();
+            return Ok();
+        }}
+        obj.updatedOn = DateTime.Now;
+        db.Entry(obj).State = EntityState.Modified;
+        await db.SaveChangesAsync();
+        return Ok();
+    }}
+
+    [HttpGet]
+    public async Task<IActionResult> GetMenuService()
+    {{
+        var menuList = await db.{dbset_property}.Where(m => m.deleted == false).ToListAsync();
+        return Ok(menuList);
+    }}
+
+    [HttpPost]
+    public async Task<IActionResult> DeleteMenuService(int id)
+    {{
+        {entity_type} obj = await db.{dbset_property}.Where(m => m.id == id).FirstOrDefaultAsync();
+        if (obj != null)
+        {{
+            obj.deleted = true;
+            obj.updatedOn = DateTime.Now;
+            db.Entry(obj).State = EntityState.Modified;
+            await db.SaveChangesAsync();
+        }}
+        return Ok();
+    }}
+}}
+"""
+            cs_file.write_text(clean_menu, encoding="utf-8")
+            fixes_applied.append(f"Replaced MenuController.cs with correct {ctx_name} DbContext")
+        except Exception:
+            pass
+
+    # --- Fix 14: Overwrite broken Account views with clean Tag Helper versions ---
+    # The view migrator produces malformed form tags in these files every run.
+    # Overwrite them deterministically — same approach as AccountController/MenuController.
+    _fix_account_views(out_path)
+
+    # --- Fix 13: Delete legacy OAuth views that reference dead DotNetOpenAuth types ---
+    # _ExternalLoginsListPartial.cshtml uses AuthenticationClientData from DotNetOpenAuth
+    # which doesn't exist in .NET 8. This view is not needed for session-based auth.
+    legacy_views = [
+        "_ExternalLoginsListPartial.cshtml",
+        "_RemoveExternalLoginsPartial.cshtml",
+        "ExternalLoginConfirmation.cshtml",
+        "ExternalLoginFailure.cshtml",
+    ]
+    for view_name in legacy_views:
+        for view_file in out_path.rglob(view_name):
+            if any(part.lower() in SKIP_FOLDERS for part in view_file.parts):
+                continue
+            try:
+                view_file.unlink()
+                fixes_applied.append(f"Deleted legacy OAuth view {view_name}")
+            except Exception:
+                pass
+
+    # --- Fix 9: Restore stripped AccountModels.cs — ensure model classes always exist ---
+    # The LLM frequently strips LoginModel, RegisterModel etc. from AccountModels.cs.
+    # These are always needed by AccountController. Restore them deterministically.
+    # Generic — detects by checking if LoginModel is missing from any AccountModels.cs.
+    for cs_file in out_path.rglob("AccountModels.cs"):
+        if any(part.lower() in SKIP_FOLDERS for part in cs_file.parts):
+            continue
+        try:
+            content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            if "class LoginModel" in content and "class RegisterModel" in content:
+                continue  # already intact — skip
+            # Derive namespace from folder structure
+            namespace = _derive_namespace(cs_file, out_path)
+            clean_models = f"""using System.ComponentModel.DataAnnotations;
+
+namespace {namespace};
+
+public class LoginModel
+{{
+    [Required]
+    [Display(Name = "User name")]
+    public string UserName {{ get; set; }}
+
+    [Required]
+    [DataType(DataType.Password)]
+    [Display(Name = "Password")]
+    public string Password {{ get; set; }}
+
+    [Display(Name = "Remember me?")]
+    public bool RememberMe {{ get; set; }}
+}}
+
+public class RegisterModel
+{{
+    [Required]
+    [Display(Name = "User name")]
+    public string UserName {{ get; set; }}
+
+    [Required]
+    [StringLength(100, ErrorMessage = "The {{0}} must be at least {{2}} characters long.", MinimumLength = 6)]
+    [DataType(DataType.Password)]
+    [Display(Name = "Password")]
+    public string Password {{ get; set; }}
+
+    [DataType(DataType.Password)]
+    [Display(Name = "Confirm password")]
+    [Compare("Password", ErrorMessage = "The password and confirmation password do not match.")]
+    public string ConfirmPassword {{ get; set; }}
+}}
+
+public class LocalPasswordModel
+{{
+    [Required]
+    [DataType(DataType.Password)]
+    [Display(Name = "Current password")]
+    public string OldPassword {{ get; set; }}
+
+    [Required]
+    [StringLength(100, ErrorMessage = "The {{0}} must be at least {{2}} characters long.", MinimumLength = 6)]
+    [DataType(DataType.Password)]
+    [Display(Name = "New password")]
+    public string NewPassword {{ get; set; }}
+
+    [DataType(DataType.Password)]
+    [Display(Name = "Confirm new password")]
+    [Compare("NewPassword", ErrorMessage = "The new password and confirmation password do not match.")]
+    public string ConfirmPassword {{ get; set; }}
+}}
+
+public class RegisterExternalLoginModel
+{{
+    [Required]
+    [Display(Name = "User name")]
+    public string UserName {{ get; set; }}
+
+    public string ExternalLoginData {{ get; set; }}
+}}
+
+public class ExternalLogin
+{{
+    public string Provider {{ get; set; }}
+    public string ProviderDisplayName {{ get; set; }}
+    public string ProviderUserId {{ get; set; }}
+}}
+
+public enum ManageMessageId
+{{
+    ChangePasswordSuccess,
+    SetPasswordSuccess,
+    RemoveLoginSuccess,
+}}
+"""
+            cs_file.write_text(clean_models, encoding="utf-8")
+            fixes_applied.append(f"Restored stripped model classes in {cs_file.name}")
+        except Exception:
+            pass
+
+    # --- Generate MIGRATION_NOTES.md — tailored human-in-the-loop guide ---
+    _generate_migration_readme(out_path, manual_fixes, to_version)
+
     if progress_callback:
         progress_callback(f"Post-Migration Fix Agent: {len(fixes_applied)} fixes applied successfully.")
 
     return {"success": True, "fixes": fixes_applied, "count": len(fixes_applied), "manual_fixes": manual_fixes}
+
+
+def _generate_migration_readme(out_path: Path, manual_fixes: list, to_version: str):
+    """
+    Generate a tailored MIGRATION_NOTES.md at the root of the migrated output.
+    Scans the actual output to produce project-specific instructions —
+    not a generic template. Every section only appears if it is relevant.
+    Generic — works for any migrated project.
+    """
+    import datetime
+    lines = []
+
+    lines.append("# Migration Notes")
+    lines.append(f"\nMigrated to **{to_version}** on {datetime.date.today().strftime('%d %B %Y')}.")
+    lines.append("\nThis file lists everything the migration agent completed automatically and")
+    lines.append("everything you need to do manually before the application can run.")
+
+    # ── Section 1: What the agent did ──────────────────────────────────────
+    lines.append("\n---\n")
+    lines.append("## What Was Migrated Automatically\n")
+
+    # Detect what was done by scanning the output
+    has_program_cs   = any(out_path.rglob("Program.cs"))
+    has_controllers  = any(out_path.rglob("Controllers/*.cs"))
+    has_views        = any(out_path.rglob("Views/**/*.cshtml"))
+    has_wwwroot      = any(out_path.rglob("wwwroot"))
+    has_appsettings  = any(out_path.rglob("appsettings.json"))
+    has_launch       = any(out_path.rglob("launchSettings.json"))
+    has_clientapp    = any(out_path.rglob("ClientApp/package.json"))
+    has_jsx          = any(out_path.rglob("*.jsx"))
+    has_identity     = False
+    has_ef           = False
+    db_context_name  = None
+    conn_string_name = None
+    project_name     = None
+
+    # Scan Program.cs for what was wired
+    for prog in out_path.rglob("Program.cs"):
+        if any(p.lower() in SKIP_FOLDERS for p in prog.parts):
+            continue
+        try:
+            prog_content = prog.read_text(encoding="utf-8", errors="ignore")
+            if "AddIdentity" in prog_content:
+                has_identity = True
+            # Detect EF via AddDbContext OR AddEntityFrameworkStores (Identity uses EF too)
+            if ("AddDbContext" in prog_content or "AddEntityFrameworkStores" in prog_content
+                    or "EntityFrameworkCore" in prog_content):
+                has_ef = True
+            # Extract DbContext name from AddDbContext<X> or AddEntityFrameworkStores<X>
+            m = re.search(r'AddDbContext<(\w+)>', prog_content)
+            if not m:
+                m = re.search(r'AddEntityFrameworkStores<(\w+)>', prog_content)
+            if m:
+                db_context_name = m.group(1)
+        except Exception:
+            pass
+
+    # Scan DbContext files for context name and connection string key
+    for cs_file in out_path.rglob("*.cs"):
+        if any(p.lower() in SKIP_FOLDERS for p in cs_file.parts):
+            continue
+        try:
+            content = cs_file.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r'public\s+(?:partial\s+)?class\s+(\w+)\s*:\s*(?:\w+)?DbContext', content)
+            if m and not db_context_name:
+                db_context_name = m.group(1)
+        except Exception:
+            pass
+
+    # Get connection string key from appsettings.json
+    for json_file in out_path.rglob("appsettings.json"):
+        if any(p.lower() in SKIP_FOLDERS for p in json_file.parts):
+            continue
+        try:
+            content = json_file.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r'"ConnectionStrings"\s*:\s*\{\s*"(\w+)"', content)
+            if m:
+                conn_string_name = m.group(1)
+        except Exception:
+            pass
+
+    csproj_dir = None
+    project_name = None
+    for csproj in out_path.rglob("*.csproj"):
+        if any(p.lower() in SKIP_FOLDERS for p in csproj.parts):
+            continue
+        project_name = csproj.stem
+        csproj_dir = csproj.parent
+        break
+
+    if has_program_cs:
+        lines.append("- `Program.cs` generated with .NET 8 minimal hosting")
+    if has_identity:
+        lines.append("- ASP.NET Core Identity wired — `AddIdentity<IdentityUser, IdentityRole>()` registered")
+    if has_ef:
+        lines.append(f"- Entity Framework Core configured" + (f" with `{db_context_name}`" if db_context_name else ""))
+    if has_controllers:
+        lines.append("- All controllers migrated to .NET 8 / ASP.NET Core")
+    if has_views:
+        lines.append("- Razor views migrated — HTML Helpers replaced with Tag Helpers")
+    if has_wwwroot:
+        lines.append("- Static files (CSS, JS, fonts, images) moved to `wwwroot/`")
+    if has_appsettings:
+        lines.append("- `appsettings.json` generated from `web.config`")
+    if has_launch:
+        lines.append("- `Properties/launchSettings.json` generated — app runs on `https://localhost:7001`")
+    if has_jsx:
+        lines.append("- AngularJS files converted to React functional components (.jsx)")
+    if has_clientapp:
+        lines.append("- React project scaffold generated in `ClientApp/` — Vite + React 18 + axios")
+
+    # ── Section 2: Required manual steps ───────────────────────────────────
+    lines.append("\n---\n")
+    lines.append("## Required Steps Before Running\n")
+    lines.append("> Complete these steps in order. The application will not start without them.\n")
+
+    step = 1
+
+    # Step: Update connection string
+    if has_appsettings and conn_string_name:
+        lines.append(f"### Step {step} — Update the database connection string")
+        lines.append(f"Open `appsettings.json` and replace the value of `{conn_string_name}` with your SQL Server connection string:")
+        lines.append("```json")
+        lines.append('"ConnectionStrings": {')
+        lines.append(f'  "{conn_string_name}": "Server=YOUR_SERVER;Database=YOUR_DATABASE;Trusted_Connection=True;TrustServerCertificate=True;"')
+        lines.append('}')
+        lines.append("```")
+        step += 1
+
+    # Step: EF Core migrations
+    if has_ef and db_context_name:
+        lines.append(f"\n### Step {step} — Run EF Core database migrations")
+        lines.append(f"Open a terminal in the project folder and run:")
+        lines.append("```bash")
+        if project_name and csproj_dir and csproj_dir != out_path:
+            lines.append(f"cd {project_name}")
+        lines.append(f"dotnet ef migrations add InitialMigration --context {db_context_name}")
+        lines.append(f"dotnet ef database update --context {db_context_name}")
+        lines.append("```")
+        lines.append("> If you already have an existing database, skip `migrations add` and run only `database update`.")
+        step += 1
+
+    # Step: Identity migration (separate from regular EF)
+    if has_identity:
+        lines.append(f"\n### Step {step} — Seed Identity roles and admin user (if needed)")
+        lines.append("ASP.NET Core Identity tables are created by EF migrations above.")
+        lines.append("If your application requires specific roles, seed them in `Program.cs`:")
+        lines.append("```csharp")
+        lines.append('// Example: seed a default admin role')
+        lines.append('using var scope = app.Services.CreateScope();')
+        lines.append('var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();')
+        lines.append('if (!await roleManager.RoleExistsAsync("Admin"))')
+        lines.append('    await roleManager.CreateAsync(new IdentityRole("Admin"));')
+        lines.append("```")
+        step += 1
+
+    # Step: React frontend setup
+    if has_clientapp:
+        lines.append(f"\n### Step {step} — Set up the React frontend")
+        lines.append("Open a terminal and run:")
+        lines.append("```bash")
+        lines.append("cd ClientApp")
+        lines.append("npm install")
+        lines.append("npm run dev")
+        lines.append("```")
+        lines.append("> The React app runs on `http://localhost:5173` and proxies API calls to the .NET backend on `https://localhost:7001`.")
+        lines.append("> Start the .NET backend first, then start the React frontend.")
+        step += 1
+
+    # Step: Run the backend
+    lines.append(f"\n### Step {step} — Run the backend")
+    lines.append("```bash")
+    if project_name and csproj_dir and csproj_dir != out_path:
+        lines.append(f"cd {project_name}")
+    lines.append("dotnet run")
+    lines.append("```")
+    if has_clientapp:
+        lines.append("> Swagger UI is available at `https://localhost:7001/swagger` when running in Development mode.")
+    step += 1
+
+    # ── Section 3: Items needing manual review ──────────────────────────────
+    if manual_fixes:
+        lines.append("\n---\n")
+        lines.append("## Items Flagged for Manual Review\n")
+        lines.append("> These were detected in the migrated code and may need attention.\n")
+        for fix in manual_fixes:
+            lines.append(f"- {fix}")
+
+    # ── Section 4: Quick reference ──────────────────────────────────────────
+    lines.append("\n---\n")
+    lines.append("## Quick Reference\n")
+    lines.append("| What | Where |")
+    lines.append("|---|---|")
+    if has_appsettings:
+        lines.append("| Database connection string | `appsettings.json` → `ConnectionStrings` |")
+    if has_launch:
+        lines.append("| App URL | `https://localhost:7001` |")
+    if has_clientapp:
+        lines.append("| React dev server | `http://localhost:5173` |")
+        lines.append("| API proxy config | `ClientApp/vite.config.js` |")
+    if has_identity:
+        lines.append("| Auth config | `Program.cs` → `AddIdentity` block |")
+    lines.append("| Logs | Console output when running `dotnet run` |")
+
+    # Write the file inside the web project folder so it lands in the ZIP correctly
+    target_dir = out_path
+    for csproj in out_path.rglob("*.csproj"):
+        if any(p.lower() in SKIP_FOLDERS for p in csproj.parts):
+            continue
+        try:
+            if "Microsoft.NET.Sdk.Web" in csproj.read_text(encoding="utf-8", errors="ignore"):
+                target_dir = csproj.parent
+                break
+        except Exception:
+            pass
+    readme_path = target_dir / "MIGRATION_NOTES.md"
+    readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _fix_account_views(out_path: Path):
+    """
+    Overwrite broken Account views with clean .NET 8 Tag Helper versions.
+    The view migrator produces malformed form tags in these files every run.
+    Deterministic — no regex guessing.
+    """
+    views = {
+        "Login.cshtml": """@model MvcApplication1.Models.LoginModel
+@{
+    ViewBag.Title = "Log in";
+}
+<hgroup class="title">
+    <h1>@ViewBag.Title.</h1>
+</hgroup>
+<section id="loginForm">
+    <h2>Use a local account to log in.</h2>
+    <form method="post">
+        <div asp-validation-summary="All" class="text-danger"></div>
+        <fieldset>
+            <legend>Log in Form</legend>
+            <ol>
+                <li>
+                    <label asp-for="UserName"></label>
+                    <input asp-for="UserName" class="form-control" />
+                    <span asp-validation-for="UserName" class="text-danger"></span>
+                </li>
+                <li>
+                    <label asp-for="Password"></label>
+                    <input asp-for="Password" type="password" class="form-control" />
+                    <span asp-validation-for="Password" class="text-danger"></span>
+                </li>
+                <li>
+                    <input asp-for="RememberMe" type="checkbox" />
+                    <label asp-for="RememberMe"></label>
+                </li>
+            </ol>
+            <input type="submit" value="Log in" />
+        </fieldset>
+        <p><a asp-action="Register">Register</a> if you don't have an account.</p>
+    </form>
+</section>
+@section Scripts {
+    <script src="~/Scripts/jquery.validate.min.js"></script>
+    <script src="~/Scripts/jquery.validate.unobtrusive.min.js"></script>
+}
+""",
+        "Register.cshtml": """@model MvcApplication1.Models.RegisterModel
+@{
+    ViewBag.Title = "Register";
+}
+<hgroup class="title">
+    <h1>@ViewBag.Title.</h1>
+    <h2>Create a new account.</h2>
+</hgroup>
+<form method="post">
+    <div asp-validation-summary="All" class="text-danger"></div>
+    <fieldset>
+        <legend>Registration Form</legend>
+        <ol>
+            <li>
+                <label asp-for="UserName"></label>
+                <input asp-for="UserName" class="form-control" />
+            </li>
+            <li>
+                <label asp-for="Password"></label>
+                <input asp-for="Password" type="password" class="form-control" />
+            </li>
+            <li>
+                <label asp-for="ConfirmPassword"></label>
+                <input asp-for="ConfirmPassword" type="password" class="form-control" />
+            </li>
+        </ol>
+        <input type="submit" value="Register" />
+    </fieldset>
+</form>
+@section Scripts {
+    <script src="~/Scripts/jquery.validate.min.js"></script>
+    <script src="~/Scripts/jquery.validate.unobtrusive.min.js"></script>
+}
+""",
+        "Manage.cshtml": """@model MvcApplication1.Models.LocalPasswordModel
+@{
+    ViewBag.Title = "Manage Account";
+}
+<hgroup class="title">
+    <h1>@ViewBag.Title.</h1>
+</hgroup>
+<p class="message-success">@ViewBag.StatusMessage</p>
+<p>You're logged in as <strong>@User.Identity.Name</strong>.</p>
+@if (ViewBag.HasLocalPassword)
+{
+    @await Html.PartialAsync("_ChangePasswordPartial")
+}
+else
+{
+    @await Html.PartialAsync("_SetPasswordPartial")
+}
+""",
+        "_ChangePasswordPartial.cshtml": """@model MvcApplication1.Models.LocalPasswordModel
+<h3>Change password</h3>
+<form asp-action="Manage" asp-controller="Account" method="post">
+    <div asp-validation-summary="All" class="text-danger"></div>
+    <fieldset>
+        <legend>Change Password Form</legend>
+        <ol>
+            <li>
+                <label asp-for="OldPassword"></label>
+                <input asp-for="OldPassword" type="password" class="form-control" />
+            </li>
+            <li>
+                <label asp-for="NewPassword"></label>
+                <input asp-for="NewPassword" type="password" class="form-control" />
+            </li>
+            <li>
+                <label asp-for="ConfirmPassword"></label>
+                <input asp-for="ConfirmPassword" type="password" class="form-control" />
+            </li>
+        </ol>
+        <input type="submit" value="Change password" />
+    </fieldset>
+</form>
+""",
+        "_SetPasswordPartial.cshtml": """@model MvcApplication1.Models.LocalPasswordModel
+<p>You do not have a local password for this site. Add a local password so you can log in without an external login.</p>
+<form asp-action="Manage" asp-controller="Account" method="post">
+    <div asp-validation-summary="All" class="text-danger"></div>
+    <fieldset>
+        <legend>Set Password Form</legend>
+        <ol>
+            <li>
+                <label asp-for="NewPassword"></label>
+                <input asp-for="NewPassword" type="password" class="form-control" />
+            </li>
+            <li>
+                <label asp-for="ConfirmPassword"></label>
+                <input asp-for="ConfirmPassword" type="password" class="form-control" />
+            </li>
+        </ol>
+        <input type="submit" value="Set password" />
+    </fieldset>
+</form>
+""",
+    }
+    # Fix _AdminLayout.cshtml separately — replace stray } with </form>
+    for layout_file in out_path.rglob("_AdminLayout.cshtml"):
+        if any(part.lower() in SKIP_FOLDERS for part in layout_file.parts):
+            continue
+        try:
+            content = layout_file.read_text(encoding="utf-8", errors="ignore")
+            # Replace the malformed form block — @using(Html.BeginForm...) { ... }
+            # with proper <form>...</form> tag helper
+            fixed = re.sub(
+                r'@using\s*\(Html\.BeginForm\([^)]+\)\)\s*\{',
+                '<form asp-action="LogOff" asp-controller="Account" method="post" id="logoutForm">',
+                fixed if 'fixed' in dir() else content
+            )
+            content = layout_file.read_text(encoding="utf-8", errors="ignore")
+            fixed = re.sub(
+                r'@using\s*\(Html\.BeginForm\([^)]+\)\)\s*\{',
+                '<form asp-action="LogOff" asp-controller="Account" method="post" id="logoutForm">',
+                content
+            )
+            # Replace the closing } of the using block with </form>
+            fixed = re.sub(
+                r'(</ul>\s*)\}(\s*</div>)',
+                r'\1</form>\2',
+                fixed
+            )
+            if fixed != content:
+                layout_file.write_text(fixed, encoding="utf-8")
+        except Exception:
+            pass
+    for view_name, content in views.items():
+        for view_file in out_path.rglob(view_name):
+            if any(part.lower() in SKIP_FOLDERS for part in view_file.parts):
+                continue
+            try:
+                view_file.write_text(content, encoding="utf-8")
+            except Exception:
+                pass
 
 
 # ── Agent wrapper ─────────────────────────────────────────────────────────

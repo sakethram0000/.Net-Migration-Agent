@@ -202,6 +202,9 @@ class MigrationOrchestrator:
                     reason=f"Compiler errors (CS*) detected — sending broken files to LLM Fixer with exact error context."
                 )
                 self.llm_fixer.run(context)
+                # Deterministic fixer always runs after LLM fixer
+                # to enforce known-correct patterns the LLM may have overwritten
+                self.fixer.run(context)
 
             elif pkg_errors:
                 self._decide(

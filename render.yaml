@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: dotnet-migration-agent
+    name: modernization-agent
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
